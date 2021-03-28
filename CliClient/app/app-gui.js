@@ -5,13 +5,13 @@ const Tag = require('lib/models/Tag.js');
 const BaseModel = require('lib/BaseModel.js');
 const Note = require('lib/models/Note.js');
 const Resource = require('lib/models/Resource.js');
-const { cliUtils } = require('./cli-utils.js');
+const Setting = require('lib/models/Setting.js');
 const { reducer, defaultState } = require('lib/reducer.js');
 const { splitCommandString } = require('lib/string-utils.js');
 const { reg } = require('lib/registry.js');
 const { _ } = require('lib/locale.js');
 const Entities = require('html-entities').AllHtmlEntities;
-const htmlentities = (new Entities()).encode;
+const htmlentities = new Entities().encode;
 
 const chalk = require('chalk');
 const tk = require('terminal-kit');
@@ -20,12 +20,10 @@ const Renderer = require('tkwidgets/framework/Renderer.js');
 const DecryptionWorker = require('lib/services/DecryptionWorker');
 
 const BaseWidget = require('tkwidgets/BaseWidget.js');
-const ListWidget = require('tkwidgets/ListWidget.js');
 const TextWidget = require('tkwidgets/TextWidget.js');
 const HLayoutWidget = require('tkwidgets/HLayoutWidget.js');
 const VLayoutWidget = require('tkwidgets/VLayoutWidget.js');
 const ReduxRootWidget = require('tkwidgets/ReduxRootWidget.js');
-const RootWidget = require('tkwidgets/RootWidget.js');
 const WindowWidget = require('tkwidgets/WindowWidget.js');
 
 const NoteWidget = require('./gui/NoteWidget.js');
@@ -35,9 +33,10 @@ const FolderListWidget = require('./gui/FolderListWidget.js');
 const NoteListWidget = require('./gui/NoteListWidget.js');
 const StatusBarWidget = require('./gui/StatusBarWidget.js');
 const ConsoleWidget = require('./gui/ConsoleWidget.js');
+const LinkSelector = require('./LinkSelector.js').default;
+
 
 class AppGui {
-
 	constructor(app, store, keymap) {
 		try {
 			this.app_ = app;
@@ -50,12 +49,12 @@ class AppGui {
 			// Some keys are directly handled by the tkwidget framework
 			// so they need to be remapped in a different way.
 			this.tkWidgetKeys_ = {
-				'focus_next': 'TAB',
-				'focus_previous': 'SHIFT_TAB',
-				'move_up': 'UP',
-				'move_down': 'DOWN',
-				'page_down': 'PAGE_DOWN',
-				'page_up': 'PAGE_UP',
+				focus_next: 'TAB',
+				focus_previous: 'SHIFT_TAB',
+				move_up: 'UP',
+				move_down: 'DOWN',
+				page_down: 'PAGE_DOWN',
+				page_up: 'PAGE_UP',
 			};
 
 			this.renderer_ = null;
@@ -64,7 +63,7 @@ class AppGui {
 
 			this.renderer_ = new Renderer(this.term(), this.rootWidget_);
 
-			this.app_.on('modelAction', async (event) => {
+			this.app_.on('modelAction', async event => {
 				await this.handleModelAction(event.action);
 			});
 
@@ -77,13 +76,15 @@ class AppGui {
 			this.currentShortcutKeys_ = [];
 			this.lastShortcutKeyTime_ = 0;
 
+			this.linkSelector_ = new LinkSelector();
+
 			// Recurrent sync is setup only when the GUI is started. In
 			// a regular command it's not necessary since the process
 			// exits right away.
 			reg.setupRecurrentSync();
 			DecryptionWorker.instance().scheduleStart();
 		} catch (error) {
-			this.fullScreen(false);
+			if (this.term_) { this.fullScreen(false); }
 			console.error(error);
 			process.exit(1);
 		}
@@ -134,11 +135,11 @@ class AppGui {
 		};
 		folderList.name = 'folderList';
 		folderList.vStretch = true;
-		folderList.on('currentItemChange', async (event) => {
+		folderList.on('currentItemChange', async event => {
 			const item = folderList.currentItem;
 
 			if (item === '-') {
-				let newIndex = event.currentIndex + (event.previousIndex < event.currentIndex ? +1 : -1);
+				const newIndex = event.currentIndex + (event.previousIndex < event.currentIndex ? +1 : -1);
 				let nextItem = folderList.itemAt(newIndex);
 				if (!nextItem) nextItem = folderList.itemAt(event.previousIndex);
 
@@ -169,7 +170,7 @@ class AppGui {
 				});
 			}
 		});
-		this.rootWidget_.connect(folderList, (state) => {
+		this.rootWidget_.connect(folderList, state => {
 			return {
 				selectedFolderId: state.selectedFolderId,
 				selectedTagId: state.selectedTagId,
@@ -190,13 +191,13 @@ class AppGui {
 			borderRightWidth: 1,
 		};
 		noteList.on('currentItemChange', async () => {
-			let note = noteList.currentItem;
+			const note = noteList.currentItem;
 			this.store_.dispatch({
 				type: 'NOTE_SELECT',
 				id: note ? note.id : null,
 			});
 		});
-		this.rootWidget_.connect(noteList, (state) => {
+		this.rootWidget_.connect(noteList, state => {
 			return {
 				selectedNoteId: state.selectedNoteIds.length ? state.selectedNoteIds[0] : null,
 				items: state.notes,
@@ -210,7 +211,7 @@ class AppGui {
 			borderBottomWidth: 1,
 			borderLeftWidth: 1,
 		};
-		this.rootWidget_.connect(noteText, (state) => {
+		this.rootWidget_.connect(noteText, state => {
 			return {
 				noteId: state.selectedNoteIds.length ? state.selectedNoteIds[0] : null,
 				notes: state.notes,
@@ -225,7 +226,7 @@ class AppGui {
 			borderLeftWidth: 1,
 			borderRightWidth: 1,
 		};
-		this.rootWidget_.connect(noteMetadata, (state) => {
+		this.rootWidget_.connect(noteMetadata, state => {
 			return { noteId: state.selectedNoteIds.length ? state.selectedNoteIds[0] : null };
 		});
 		noteMetadata.hide();
@@ -247,9 +248,9 @@ class AppGui {
 
 		const hLayout = new HLayoutWidget();
 		hLayout.name = 'hLayout';
-		hLayout.addChild(folderList, { type: 'stretch', factor: 1 });
-		hLayout.addChild(noteList, { type: 'stretch', factor: 1 });
-		hLayout.addChild(noteLayout, { type: 'stretch', factor: 2 });
+		hLayout.addChild(folderList, { type: 'stretch', factor: Setting.value('layout.folderList.factor') });
+		hLayout.addChild(noteList, { type: 'stretch', factor: Setting.value('layout.noteList.factor') });
+		hLayout.addChild(noteLayout, { type: 'stretch', factor: Setting.value('layout.note.factor') });
 
 		const vLayout = new VLayoutWidget();
 		vLayout.name = 'vLayout';
@@ -292,7 +293,7 @@ class AppGui {
 		if (!cmd) return;
 		const isConfigPassword = cmd.indexOf('config ') >= 0 && cmd.indexOf('password') >= 0;
 		if (isConfigPassword) return;
-		this.stdout(chalk.cyan.bold('> ' + cmd));	
+		this.stdout(chalk.cyan.bold(`> ${cmd}`));
 	}
 
 	setupKeymap(keymap) {
@@ -301,7 +302,7 @@ class AppGui {
 		for (let i = 0; i < keymap.length; i++) {
 			const item = Object.assign({}, keymap[i]);
 
-			if (!item.command) throw new Error('Missing command for keymap item: ' + JSON.stringify(item));
+			if (!item.command) throw new Error(`Missing command for keymap item: ${JSON.stringify(item)}`);
 
 			if (!('type' in item)) item.type = 'exec';
 
@@ -342,7 +343,7 @@ class AppGui {
 
 		if (consoleWidget.isMaximized__ === doMaximize) return;
 
-		let constraints = {
+		const constraints = {
 			type: 'stretch',
 			factor: !doMaximize ? 1 : 4,
 		};
@@ -408,7 +409,7 @@ class AppGui {
 	activeListItem() {
 		const widget = this.widget('mainWindow').focusedWidget;
 		if (!widget) return null;
-		
+
 		if (widget.name == 'noteList' || widget.name == 'folderList') {
 			return widget.currentItem;
 		}
@@ -419,10 +420,10 @@ class AppGui {
 	async handleModelAction(action) {
 		this.logger().info('Action:', action);
 
-		let state = Object.assign({}, defaultState);
+		const state = Object.assign({}, defaultState);
 		state.notes = this.widget('noteList').items;
 
-		let newState = reducer(state, action);
+		const newState = reducer(state, action);
 
 		if (newState !== state) {
 			this.widget('noteList').items = newState.notes;
@@ -430,25 +431,21 @@ class AppGui {
 	}
 
 	async processFunctionCommand(cmd) {
-
 		if (cmd === 'activate') {
-
 			const w = this.widget('mainWindow').focusedWidget;
 			if (w.name === 'folderList') {
 				this.widget('noteList').focus();
 			} else if (w.name === 'noteList' || w.name === 'noteText') {
 				this.processPromptCommand('edit $n');
 			}
-
 		} else if (cmd === 'delete') {
-
 			if (this.widget('folderList').hasFocus) {
 				const item = this.widget('folderList').selectedJoplinItem;
 
 				if (!item) return;
 
 				if (item.type_ === BaseModel.TYPE_FOLDER) {
-					await this.processPromptCommand('rmbook ' + item.id);
+					await this.processPromptCommand(`rmbook ${item.id}`);
 				} else if (item.type_ === BaseModel.TYPE_TAG) {
 					this.stdout(_('To delete a tag, untag the associated notes.'));
 				} else if (item.type_ === BaseModel.TYPE_SEARCH) {
@@ -462,9 +459,31 @@ class AppGui {
 			} else {
 				this.stdout(_('Please select the note or notebook to be deleted first.'));
 			}
+		} else if (cmd === 'next_link' || cmd === 'previous_link') {
+			const noteText = this.widget('noteText');
 
+			noteText.render();
+
+			if (cmd === 'next_link') this.linkSelector_.changeLink(noteText, 1);
+			else this.linkSelector_.changeLink(noteText, -1);
+
+			this.linkSelector_.scrollWidget(noteText);
+
+			const cursorOffsetX = this.widget('mainWindow').width - noteText.innerWidth - 8;
+			const cursorOffsetY = 1 - noteText.scrollTop_;
+
+			if (this.linkSelector_.link) {
+				this.term_.moveTo(
+					this.linkSelector_.noteX + cursorOffsetX,
+					this.linkSelector_.noteY + cursorOffsetY
+				);
+				setTimeout(() => this.term_.term().inverse(this.linkSelector_.link), 50);
+			}
+		} else if (cmd === 'open_link') {
+			if (this.widget('noteText').hasFocus) {
+				this.linkSelector_.openLink(this.widget('noteText'));
+			}
 		} else if (cmd === 'toggle_console') {
-
 			if (!this.consoleIsShown()) {
 				this.showConsole();
 				this.minimizeConsole();
@@ -475,22 +494,15 @@ class AppGui {
 					this.maximizeConsole();
 				}
 			}
-
 		} else if (cmd === 'toggle_metadata') {
-
 			this.toggleNoteMetadata();
-
 		} else if (cmd === 'enter_command_line_mode') {
-
 			const cmd = await this.widget('statusBar').prompt();
 			if (!cmd) return;
 			this.addCommandToConsole(cmd);
-			await this.processPromptCommand(cmd);			
-
+			await this.processPromptCommand(cmd);
 		} else {
-
-			throw new Error('Unknown command: ' + cmd);
-
+			throw new Error(`Unknown command: ${cmd}`);
 		}
 	}
 
@@ -501,17 +513,17 @@ class AppGui {
 
 		// this.logger().debug('Got command: ' + cmd);
 
-		try {			
-			let note = this.widget('noteList').currentItem;
-			let folder = this.widget('folderList').currentItem;
-			let args = splitCommandString(cmd);
+		try {
+			const note = this.widget('noteList').currentItem;
+			const folder = this.widget('folderList').currentItem;
+			const args = splitCommandString(cmd);
 
 			for (let i = 0; i < args.length; i++) {
 				if (args[i] == '$n') {
 					args[i] = note ? note.id : '';
 				} else if (args[i] == '$b') {
 					args[i] = folder ? folder.id : '';
-				} else  if (args[i] == '$c') {
+				} else if (args[i] == '$c') {
 					const item = this.activeListItem();
 					args[i] = item ? item.id : '';
 				}
@@ -523,7 +535,7 @@ class AppGui {
 		}
 
 		this.widget('console').scrollBottom();
-		
+
 		// Invalidate so that the screen is redrawn in case inputting a command has moved
 		// the GUI up (in particular due to autocompletion), it's moved back to the right position.
 		this.widget('root').invalidate();
@@ -565,7 +577,7 @@ class AppGui {
 	stdout(text) {
 		if (text === null || text === undefined) return;
 
-		let lines = text.split('\n');
+		const lines = text.split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const v = typeof lines[i] === 'object' ? JSON.stringify(lines[i]) : lines[i];
 			this.widget('console').addLine(v);
@@ -603,17 +615,17 @@ class AppGui {
 	async setupResourceServer() {
 		const linkStyle = chalk.blue.underline;
 		const noteTextWidget = this.widget('noteText');
-		const resourceIdRegex = /^:\/[a-f0-9]+$/i
+		const resourceIdRegex = /^:\/[a-f0-9]+$/i;
 		const noteLinks = {};
 
 		const hasProtocol = function(s, protocols) {
 			if (!s) return false;
 			s = s.trim().toLowerCase();
 			for (let i = 0; i < protocols.length; i++) {
-				if (s.indexOf(protocols[i] + '://') === 0) return true;
+				if (s.indexOf(`${protocols[i]}://`) === 0) return true;
 			}
 			return false;
-		}
+		};
 
 		// By default, before the server is started, only the regular
 		// URLs appear in blue.
@@ -637,29 +649,31 @@ class AppGui {
 			const link = noteLinks[path];
 
 			if (link.type === 'url') {
-				response.writeHead(302, { 'Location': link.url });
+				response.writeHead(302, { Location: link.url });
 				return true;
 			}
 
 			if (link.type === 'item') {
 				const itemId = link.id;
-				let item = await BaseItem.loadItemById(itemId);
-				if (!item) throw new Error('No item with ID ' + itemId); // Should be nearly impossible
+				const item = await BaseItem.loadItemById(itemId);
+				if (!item) throw new Error(`No item with ID ${itemId}`); // Should be nearly impossible
 
 				if (item.type_ === BaseModel.TYPE_RESOURCE) {
 					if (item.mime) response.setHeader('Content-Type', item.mime);
 					response.write(await Resource.content(item));
 				} else if (item.type_ === BaseModel.TYPE_NOTE) {
-					const html = [`
+					const html = [
+						`
 						<!DOCTYPE html>
 						<html class="client-nojs" lang="en" dir="ltr">
 						<head><meta charset="UTF-8"/></head><body>
-					`];
-					html.push('<pre>' + htmlentities(item.title) + '\n\n' + htmlentities(item.body) + '</pre>');
+					`,
+					];
+					html.push(`<pre>${htmlentities(item.title)}\n\n${htmlentities(item.body)}</pre>`);
 					html.push('</body></html>');
 					response.write(html.join(''));
 				} else {
-					throw new Error('Unsupported item type: ' + item.type_);
+					throw new Error(`Unsupported item type: ${item.type_}`);
 				}
 
 				return true;
@@ -679,7 +693,7 @@ class AppGui {
 					noteLinks[index] = {
 						type: 'item',
 						id: url.substr(2),
-					};					
+					};
 				} else if (hasProtocol(url, ['http', 'https', 'file', 'ftp'])) {
 					noteLinks[index] = {
 						type: 'url',
@@ -691,7 +705,7 @@ class AppGui {
 					return url;
 				}
 
-				return linkStyle(this.resourceServer_.baseUrl() + '/' + index);
+				return linkStyle(`${this.resourceServer_.baseUrl()}/${index}`);
 			},
 		};
 	}
@@ -710,8 +724,7 @@ class AppGui {
 
 			term.grabInput();
 
-			term.on('key', async (name, matches, data) => {
-
+			term.on('key', async (name) => {
 				// -------------------------------------------------------------------------
 				// Handle special shortcuts
 				// -------------------------------------------------------------------------
@@ -729,13 +742,13 @@ class AppGui {
 					return;
 				}
 
-				if (name === 'CTRL_C' ) {
+				if (name === 'CTRL_C') {
 					const cmd = this.app().currentCommand();
 					if (!cmd || !cmd.cancellable() || this.commandCancelCalled_) {
 						this.stdout(_('Press Ctrl+D or type "exit" to exit the application'));
 					} else {
 						this.commandCancelCalled_ = true;
-						await cmd.cancel()
+						await cmd.cancel();
 						this.commandCancelCalled_ = false;
 					}
 					return;
@@ -744,8 +757,8 @@ class AppGui {
 				// -------------------------------------------------------------------------
 				// Build up current shortcut
 				// -------------------------------------------------------------------------
-				
-				const now = (new Date()).getTime();
+
+				const now = new Date().getTime();
 
 				if (now - this.lastShortcutKeyTime_ > 800 || this.isSpecialKey(name)) {
 					this.currentShortcutKeys_ = [name];
@@ -766,7 +779,7 @@ class AppGui {
 				// -------------------------------------------------------------------------
 
 				const shortcutKey = this.currentShortcutKeys_.join('');
-				let keymapItem = this.keymapItemByKey(shortcutKey);
+				const keymapItem = this.keymapItemByKey(shortcutKey);
 
 				// If this command is an alias to another command, resolve to the actual command
 
@@ -782,7 +795,7 @@ class AppGui {
 					if (keymapItem.type === 'function') {
 						this.processFunctionCommand(keymapItem.command);
 					} else if (keymapItem.type === 'prompt') {
-						let promptOptions = {};
+						const promptOptions = {};
 						if ('cursorPosition' in keymapItem) promptOptions.cursorPosition = keymapItem.cursorPosition;
 						const commandString = await statusBar.prompt(keymapItem.command ? keymapItem.command : '', null, promptOptions);
 						this.addCommandToConsole(commandString);
@@ -793,7 +806,7 @@ class AppGui {
 					} else if (keymapItem.type === 'tkwidgets') {
 						this.widget('root').handleKey(this.tkWidgetKeys_[keymapItem.command]);
 					} else {
-						throw new Error('Unknown command type: ' + JSON.stringify(keymapItem));
+						throw new Error(`Unknown command type: ${JSON.stringify(keymapItem)}`);
 					}
 				}
 
@@ -813,7 +826,6 @@ class AppGui {
 			process.exit(1);
 		});
 	}
-
 }
 
 AppGui.INPUT_MODE_NORMAL = 1;

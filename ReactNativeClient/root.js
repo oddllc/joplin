@@ -1,6 +1,9 @@
-const React = require('react'); const Component = React.Component;
-const { AppState, Keyboard, NativeModules, BackHandler, Platform, View, Animated } = require('react-native');
-const { SafeAreaView } = require('react-navigation');
+import setUpQuickActions from './setUpQuickActions';
+import PluginAssetsLoader from './PluginAssetsLoader';
+
+const React = require('react');
+const { AppState, Keyboard, NativeModules, BackHandler, Animated, View, StatusBar, Text, Image } = require('react-native');
+const SafeAreaView = require('lib/components/SafeAreaView');
 const { connect, Provider } = require('react-redux');
 const { BackButtonService } = require('lib/services/back-button.js');
 const NavService = require('lib/services/NavService.js');
@@ -41,6 +44,7 @@ const { SearchScreen } = require('lib/components/screens/search.js');
 const { OneDriveLoginScreen } = require('lib/components/screens/onedrive-login.js');
 const { EncryptionConfigScreen } = require('lib/components/screens/encryption-config.js');
 const { DropboxLoginScreen } = require('lib/components/screens/dropbox-login.js');
+const UpgradeSyncTargetScreen = require('lib/components/screens/UpgradeSyncTargetScreen').default;
 const Setting = require('lib/models/Setting.js');
 const { MenuContext } = require('react-native-popup-menu');
 const { SideMenu } = require('lib/components/side-menu.js');
@@ -48,17 +52,22 @@ const { SideMenuContent } = require('lib/components/side-menu-content.js');
 const { SideMenuContentNote } = require('lib/components/side-menu-content-note.js');
 const { DatabaseDriverReactNative } = require('lib/database-driver-react-native');
 const { reg } = require('lib/registry.js');
-const { _, setLocale, closestSupportedLocale, defaultLocale } = require('lib/locale.js');
+const { setLocale, closestSupportedLocale, defaultLocale } = require('lib/locale.js');
 const RNFetchBlob = require('rn-fetch-blob').default;
 const { PoorManIntervals } = require('lib/poor-man-intervals.js');
 const { reducer, defaultState } = require('lib/reducer.js');
 const { FileApiDriverLocal } = require('lib/file-api-driver-local.js');
 const DropdownAlert = require('react-native-dropdownalert').default;
-const ShareExtension = require('react-native-share-extension').default;
+const ShareExtension = require('lib/ShareExtension.js').default;
+const handleShared = require('lib/shareHandler').default;
 const ResourceFetcher = require('lib/services/ResourceFetcher');
-const SearchEngine = require('lib/services/SearchEngine');
+const SearchEngine = require('lib/services/searchengine/SearchEngine');
 const WelcomeUtils = require('lib/WelcomeUtils');
 const { themeStyle } = require('lib/components/global-style.js');
+const { uuid } = require('lib/uuid.js');
+
+const { loadKeychainServiceAndSettings } = require('lib/services/SettingUtils');
+const KeychainServiceDriverMobile = require('lib/services/keychain/KeychainServiceDriver.mobile').default;
 
 const SyncTargetRegistry = require('lib/SyncTargetRegistry.js');
 const SyncTargetOneDrive = require('lib/SyncTargetOneDrive.js');
@@ -67,28 +76,31 @@ const SyncTargetOneDriveDev = require('lib/SyncTargetOneDriveDev.js');
 const SyncTargetNextcloud = require('lib/SyncTargetNextcloud.js');
 const SyncTargetWebDAV = require('lib/SyncTargetWebDAV.js');
 const SyncTargetDropbox = require('lib/SyncTargetDropbox.js');
+const SyncTargetAmazonS3 = require('lib/SyncTargetAmazonS3.js');
+
 SyncTargetRegistry.addClass(SyncTargetOneDrive);
-SyncTargetRegistry.addClass(SyncTargetOneDriveDev);
+if (__DEV__) SyncTargetRegistry.addClass(SyncTargetOneDriveDev);
 SyncTargetRegistry.addClass(SyncTargetNextcloud);
 SyncTargetRegistry.addClass(SyncTargetWebDAV);
 SyncTargetRegistry.addClass(SyncTargetDropbox);
 SyncTargetRegistry.addClass(SyncTargetFilesystem);
+SyncTargetRegistry.addClass(SyncTargetAmazonS3);
 
 const FsDriverRN = require('lib/fs-driver-rn.js').FsDriverRN;
 const DecryptionWorker = require('lib/services/DecryptionWorker');
 const EncryptionService = require('lib/services/EncryptionService');
 const MigrationService = require('lib/services/MigrationService');
 
-let storeDispatch = function(action) {};
+let storeDispatch = function() {};
 
 const logReducerAction = function(action) {
 	if (['SIDE_MENU_OPEN_PERCENT', 'SYNC_REPORT_UPDATE'].indexOf(action.type) >= 0) return;
 
-	let msg = [action.type];
+	const msg = [action.type];
 	if (action.routeName) msg.push(action.routeName);
 
 	// reg.logger().debug('Reducer action', msg.join(', '));
-}
+};
 
 const generalMiddleware = store => next => async (action) => {
 	logReducerAction(action);
@@ -99,10 +111,10 @@ const generalMiddleware = store => next => async (action) => {
 
 	await reduxSharedMiddleware(store, next, action);
 
-	if (action.type == "NAV_GO") Keyboard.dismiss();
+	if (action.type == 'NAV_GO') Keyboard.dismiss();
 
-	if (["NOTE_UPDATE_ONE", "NOTE_DELETE", "FOLDER_UPDATE_ONE", "FOLDER_DELETE"].indexOf(action.type) >= 0) {
-		if (!await reg.syncTarget().syncStarted()) reg.scheduleSync(5 * 1000, { syncSteps: ["update_remote", "delete_remote"] });
+	if (['NOTE_UPDATE_ONE', 'NOTE_DELETE', 'FOLDER_UPDATE_ONE', 'FOLDER_DELETE'].indexOf(action.type) >= 0) {
+		if (!await reg.syncTarget().syncStarted()) reg.scheduleSync(5 * 1000, { syncSteps: ['update_remote', 'delete_remote'] });
 		SearchEngine.instance().scheduleSyncTables();
 	}
 
@@ -146,21 +158,21 @@ const generalMiddleware = store => next => async (action) => {
 		DecryptionWorker.instance().scheduleStart();
 	}
 
-	if (action.type === 'SYNC_CREATED_RESOURCE') {
+	if (action.type === 'SYNC_CREATED_OR_UPDATED_RESOURCE') {
 		ResourceFetcher.instance().autoAddResources();
 	}
 
-  	return result;
-}
+	return result;
+};
 
-let navHistory = [];
+const navHistory = [];
 
-function historyCanGoBackTo(route, nextRoute) {
+function historyCanGoBackTo(route) {
 	if (route.routeName === 'Note') return false;
 	if (route.routeName === 'Folder') return false;
 
 	// There's no point going back to these screens in general and, at least in OneDrive case,
-	// it can be buggy to do so, due to incorrectly relying on global state (reg.syncTarget...) 
+	// it can be buggy to do so, due to incorrectly relying on global state (reg.syncTarget...)
 	if (route.routeName === 'OneDriveLogin') return false;
 	if (route.routeName === 'DropboxLogin') return false;
 
@@ -187,33 +199,35 @@ const appReducer = (state = appDefaultState, action) => {
 	try {
 		switch (action.type) {
 
-			case 'NAV_BACK':
+		case 'NAV_BACK':
 
-				if (!navHistory.length) break;
+		{
+			if (!navHistory.length) break;
 
-				let newAction = null;
-				while (navHistory.length) {
-					newAction = navHistory.pop();
-					if (newAction.routeName != state.route.routeName) break;
-				}
+			let newAction = null;
+			while (navHistory.length) {
+				newAction = navHistory.pop();
+				if (newAction.routeName != state.route.routeName) break;
+			}
 
-				action = newAction ? newAction : navHistory.pop();
+			action = newAction ? newAction : navHistory.pop();
 
-				historyGoingBack = true;
+			historyGoingBack = true;
+		}
 
-				// Fall throught
+		// Fall throught
 
-			case 'NAV_GO':
+		case 'NAV_GO':
 
+			{
 				const currentRoute = state.route;
-				const currentRouteName = currentRoute ? currentRoute.routeName : '';
 
 				if (!historyGoingBack && historyCanGoBackTo(currentRoute, action)) {
-					// If the route *name* is the same (even if the other parameters are different), we
-					// overwrite the last route in the history with the current one. If the route name
-					// is different, we push a new history entry.
+				// If the route *name* is the same (even if the other parameters are different), we
+				// overwrite the last route in the history with the current one. If the route name
+				// is different, we push a new history entry.
 					if (currentRoute.routeName == action.routeName) {
-						// nothing
+					// nothing
 					} else {
 						navHistory.push(currentRoute);
 					}
@@ -226,15 +240,15 @@ const appReducer = (state = appDefaultState, action) => {
 				// are loaded. Might be good enough since going back to different folders
 				// is probably not a common workflow.
 				for (let i = 0; i < navHistory.length; i++) {
-					let n = navHistory[i];
+					const n = navHistory[i];
 					if (n.routeName == action.routeName) {
 						navHistory[i] = Object.assign({}, action);
 					}
 				}
 
-				//reg.logger().info('Route: ' + currentRouteName + ' => ' + action.routeName);
-
 				newState = Object.assign({}, state);
+
+				newState.selectedNoteHash = '';
 
 				if ('noteId' in action) {
 					newState.selectedNoteIds = action.noteId ? [action.noteId] : [];
@@ -259,6 +273,10 @@ const appReducer = (state = appDefaultState, action) => {
 					newState.selectedItemType = action.itemType;
 				}
 
+				if ('noteHash' in action) {
+					newState.selectedNoteHash = action.noteHash;
+				}
+
 				if ('sharedData' in action) {
 					newState.sharedData = action.sharedData;
 				} else {
@@ -267,34 +285,36 @@ const appReducer = (state = appDefaultState, action) => {
 
 				newState.route = action;
 				newState.historyCanGoBack = !!navHistory.length;
-				break;
+			}
+			break;
 
-			case 'SIDE_MENU_TOGGLE':
+		case 'SIDE_MENU_TOGGLE':
 
-				newState = Object.assign({}, state);
-				newState.showSideMenu = !newState.showSideMenu
-				break;
+			newState = Object.assign({}, state);
+			newState.showSideMenu = !newState.showSideMenu;
+			break;
 
-			case 'SIDE_MENU_OPEN':
+		case 'SIDE_MENU_OPEN':
 
-				newState = Object.assign({}, state);
-				newState.showSideMenu = true
-				break;
+			newState = Object.assign({}, state);
+			newState.showSideMenu = true;
+			break;
 
-			case 'SIDE_MENU_CLOSE':
+		case 'SIDE_MENU_CLOSE':
 
-				newState = Object.assign({}, state);
-				newState.showSideMenu = false
-				break;
+			newState = Object.assign({}, state);
+			newState.showSideMenu = false;
+			break;
 
-			case 'SIDE_MENU_OPEN_PERCENT':
+		case 'SIDE_MENU_OPEN_PERCENT':
 
-				newState = Object.assign({}, state);
-				newState.sideMenuOpenPercent = action.value;
-				break;
+			newState = Object.assign({}, state);
+			newState.sideMenuOpenPercent = action.value;
+			break;
 
-			case 'NOTE_SELECTION_TOGGLE':
+		case 'NOTE_SELECTION_TOGGLE':
 
+			{
 				newState = Object.assign({}, state);
 
 				const noteId = action.id;
@@ -309,40 +329,41 @@ const appReducer = (state = appDefaultState, action) => {
 
 				newState.selectedNoteIds = newSelectedNoteIds;
 				newState.noteSelectionEnabled = !!newSelectedNoteIds.length;
-				break;
+			}
+			break;
 
-			case 'NOTE_SELECTION_START':
+		case 'NOTE_SELECTION_START':
 
-				if (!state.noteSelectionEnabled) {
-					newState = Object.assign({}, state);
-					newState.noteSelectionEnabled = true;
-					newState.selectedNoteIds = [action.id];
-				}
-				break;
-
-			case 'NOTE_SELECTION_END':
-
+			if (!state.noteSelectionEnabled) {
 				newState = Object.assign({}, state);
-				newState.noteSelectionEnabled = false;
-				newState.selectedNoteIds = [];
-				break;
+				newState.noteSelectionEnabled = true;
+				newState.selectedNoteIds = [action.id];
+			}
+			break;
 
-			case 'NOTE_SIDE_MENU_OPTIONS_SET':
+		case 'NOTE_SELECTION_END':
 
-				newState = Object.assign({}, state);
-				newState.noteSideMenuOptions = action.options;
-				break;
+			newState = Object.assign({}, state);
+			newState.noteSelectionEnabled = false;
+			newState.selectedNoteIds = [];
+			break;
+
+		case 'NOTE_SIDE_MENU_OPTIONS_SET':
+
+			newState = Object.assign({}, state);
+			newState.noteSideMenuOptions = action.options;
+			break;
 
 		}
 	} catch (error) {
-		error.message = 'In reducer: ' + error.message + ' Action: ' + JSON.stringify(action);
+		error.message = `In reducer: ${error.message} Action: ${JSON.stringify(action)}`;
 		throw error;
 	}
 
 	return reducer(newState, action);
-}
+};
 
-let store = createStore(appReducer, applyMiddleware(generalMiddleware));
+const store = createStore(appReducer, applyMiddleware(generalMiddleware));
 storeDispatch = store.dispatch;
 
 function resourceFetcher_downloadComplete(event) {
@@ -351,7 +372,11 @@ function resourceFetcher_downloadComplete(event) {
 	}
 }
 
-async function initialize(dispatch) {
+function decryptionWorker_resourceMetadataButNotBlobDecrypted() {
+	ResourceFetcher.instance().scheduleAutoAddResources();
+}
+
+async function initialize(dispatch, messageHandler) {
 	shimInit();
 
 	Setting.setConstant('env', __DEV__ ? 'dev' : 'prod');
@@ -366,22 +391,22 @@ async function initialize(dispatch) {
 	const mainLogger = new Logger();
 	mainLogger.addTarget('database', { database: logDatabase, source: 'm' });
 	mainLogger.setLevel(Logger.LEVEL_INFO);
-	
+
 	if (Setting.value('env') == 'dev') {
 		mainLogger.addTarget('console');
 		mainLogger.setLevel(Logger.LEVEL_DEBUG);
 	}
 
 	reg.setLogger(mainLogger);
-	reg.setShowErrorMessageBoxHandler((message) => { alert(message) });
+	reg.setShowErrorMessageBoxHandler((message) => { alert(message); });
 
 	BaseService.logger_ = mainLogger;
 
 	reg.logger().info('====================================');
-	reg.logger().info('Starting application ' + Setting.value('appId') + ' (' + Setting.value('env') + ')');
+	reg.logger().info(`Starting application ${Setting.value('appId')} (${Setting.value('env')})`);
 
 	const dbLogger = new Logger();
-	dbLogger.addTarget('database', { database: logDatabase, source: 'm' }); 
+	dbLogger.addTarget('database', { database: logDatabase, source: 'm' });
 	if (Setting.value('env') == 'dev') {
 		dbLogger.addTarget('console');
 		dbLogger.setLevel(Logger.LEVEL_INFO); // Set to LEVEL_DEBUG for full SQL queries
@@ -389,8 +414,13 @@ async function initialize(dispatch) {
 		dbLogger.setLevel(Logger.LEVEL_INFO);
 	}
 
-	let db = new JoplinDatabase(new DatabaseDriverReactNative());
+	const db_startUpgrade = (event) => {
+		messageHandler(`Upgrading database to v${event.version}...`);
+	};
+
+	const db = new JoplinDatabase(new DatabaseDriverReactNative());
 	db.setLogger(dbLogger);
+	db.eventEmitter().on('startMigration', db_startUpgrade);
 	reg.setDb(db);
 
 	reg.dispatch = dispatch;
@@ -398,7 +428,7 @@ async function initialize(dispatch) {
 	FoldersScreenUtils.dispatch = dispatch;
 	BaseSyncTarget.dispatch = dispatch;
 	NavService.dispatch = dispatch;
-	BaseModel.db_ = db;
+	BaseModel.setDb(db);
 
 	KvStore.instance().setDb(reg.db());
 
@@ -420,19 +450,26 @@ async function initialize(dispatch) {
 
 	try {
 		if (Setting.value('env') == 'prod') {
-			await db.open({ name: 'joplin.sqlite' })
+			await db.open({ name: 'joplin.sqlite' });
 		} else {
-			await db.open({ name: 'joplin-68.sqlite' });
+			await db.open({ name: 'joplin-76.sqlite' });
 
 			// await db.clearForTesting();
 		}
 
+		db.eventEmitter().removeListener('startMigration', db_startUpgrade);
+
 		reg.logger().info('Database is ready.');
 		reg.logger().info('Loading settings...');
-		await Setting.load();
+
+		messageHandler('Initialising application...');
+
+		await loadKeychainServiceAndSettings(KeychainServiceDriverMobile);
+
+		if (!Setting.value('clientId')) Setting.setValue('clientId', uuid.create());
 
 		if (Setting.value('firstStart')) {
-			let locale = NativeModules.I18nManager.localeIdentifier
+			let locale = NativeModules.I18nManager.localeIdentifier;
 			if (!locale) locale = defaultLocale();
 			Setting.setValue('locale', closestSupportedLocale(locale));
 			if (Setting.value('env') === 'dev') Setting.setValue('sync.target', SyncTargetRegistry.nameToId('onedrive_dev'));
@@ -447,16 +484,20 @@ async function initialize(dispatch) {
 
 		if (Setting.value('env') === 'dev') {
 			Setting.setValue('welcome.enabled', false);
-		}		
+		}
 
+		PluginAssetsLoader.instance().setLogger(mainLogger);
+		await PluginAssetsLoader.instance().importAssets();
+
+		// eslint-disable-next-line require-atomic-updates
 		BaseItem.revisionService_ = RevisionService.instance();
 
-		// Note: for now we hard-code the folder sort order as we need to 
+		// Note: for now we hard-code the folder sort order as we need to
 		// create a UI to allow customisation (started in branch mobile_add_sidebar_buttons)
 		Setting.setValue('folders.sortOrder.field', 'title');
 		Setting.setValue('folders.sortOrder.reverse', false);
 
-		reg.logger().info('Sync target: ' + Setting.value('sync.target'));
+		reg.logger().info(`Sync target: ${Setting.value('sync.target')}`);
 
 		setLocale(Setting.value('locale'));
 
@@ -466,12 +507,14 @@ async function initialize(dispatch) {
 
 		EncryptionService.fsDriver_ = fsDriver;
 		EncryptionService.instance().setLogger(mainLogger);
+		// eslint-disable-next-line require-atomic-updates
 		BaseItem.encryptionService_ = EncryptionService.instance();
 		DecryptionWorker.instance().dispatch = dispatch;
 		DecryptionWorker.instance().setLogger(mainLogger);
 		DecryptionWorker.instance().setKvStore(KvStore.instance());
 		DecryptionWorker.instance().setEncryptionService(EncryptionService.instance());
 		await EncryptionService.instance().loadMasterKeysFromSettings();
+		DecryptionWorker.instance().on('resourceMetadataButNotBlobDecrypted', decryptionWorker_resourceMetadataButNotBlobDecrypted);
 
 		// ----------------------------------------------------------------
 		// / E2EE SETUP
@@ -495,7 +538,7 @@ async function initialize(dispatch) {
 			items: masterKeys,
 		});
 
-		let folderId = Setting.value('activeFolderId');
+		const folderId = Setting.value('activeFolderId');
 		let folder = await Folder.load(folderId);
 
 		if (!folder) folder = await Folder.defaultFolder();
@@ -514,8 +557,10 @@ async function initialize(dispatch) {
 				folderId: folder.id,
 			});
 		}
+
+		setUpQuickActions(dispatch, folderId);
 	} catch (error) {
-		alert('Initialization error: ' + error.message);
+		alert(`Initialization error: ${error.message}`);
 		reg.logger().error('Initialization error:', error);
 	}
 
@@ -527,7 +572,7 @@ async function initialize(dispatch) {
 
 	ResourceService.runInBackground();
 
-	ResourceFetcher.instance().setFileApi(() => { return reg.syncTarget().fileApi() });
+	ResourceFetcher.instance().setFileApi(() => { return reg.syncTarget().fileApi(); });
 	ResourceFetcher.instance().setLogger(reg.logger());
 	ResourceFetcher.instance().dispatch = dispatch;
 	ResourceFetcher.instance().on('downloadComplete', resourceFetcher_downloadComplete);
@@ -539,7 +584,9 @@ async function initialize(dispatch) {
 
 	await MigrationService.instance().run();
 
-	reg.scheduleSync().then(() => {
+	// When the app starts we want the full sync to
+	// start almost immediately to get the latest data.
+	reg.scheduleSync(1000).then(() => {
 		// Wait for the first sync before updating the notifications, since synchronisation
 		// might change the notifications.
 		AlarmService.updateAllNotifications();
@@ -563,87 +610,66 @@ class AppComponent extends React.Component {
 
 		this.state = {
 			sideMenuContentOpacity: new Animated.Value(0),
+			initMessage: '',
 		};
 
 		this.lastSyncStarted_ = defaultState.syncStarted;
 
 		this.backButtonHandler_ = () => {
 			return this.backButtonHandler();
-		}
+		};
 
 		this.onAppStateChange_ = () => {
 			PoorManIntervals.update();
-		}
+		};
 	}
 
-	async componentDidMount() {
-		if (this.props.appState == 'starting') {
+	componentDidMount() {
+		setTimeout(async () => {
+			// We run initialization code with a small delay to give time
+			// to the view to render "please wait" messages.
+
 			this.props.dispatch({
 				type: 'APP_STATE_SET',
 				state: 'initializing',
 			});
 
-			await initialize(this.props.dispatch);
+			await initialize(this.props.dispatch, (message) => {
+				this.setState({ initMessage: message });
+			});
+
+			BackButtonService.initialize(this.backButtonHandler_);
+
+			AlarmService.setInAppNotificationHandler(async (alarmId) => {
+				const alarm = await Alarm.load(alarmId);
+				const notification = await Alarm.makeNotification(alarm);
+				this.dropdownAlert_.alertWithType('info', notification.title, notification.body ? notification.body : '');
+			});
+
+			AppState.addEventListener('change', this.onAppStateChange_);
+
+			const sharedData = await ShareExtension.data();
+			if (sharedData) {
+				reg.logger().info('Received shared data');
+				if (this.props.selectedFolderId) {
+					handleShared(sharedData, this.props.selectedFolderId, this.props.dispatch);
+				} else {
+					reg.logger.info('Cannot handle share - default folder id is not set');
+				}
+			}
 
 			this.props.dispatch({
 				type: 'APP_STATE_SET',
 				state: 'ready',
 			});
-		}
-
-		if (Platform.OS !== 'ios') {
-			try {
-				const { type, value } = await ShareExtension.data();
-
-				// reg.logger().info('Got share data:', type, value);
-
-				if (type != "" && this.props.selectedFolderId) {
-					const newNote = await Note.save({
-						title: Note.defaultTitleFromBody(value),
-						body: value,
-						parent_id: this.props.selectedFolderId
-					});
-
-					// This is a bit hacky, but the surest way to go to 
-					// the needed note. We go back one screen in case there's
-					// already a note open - if we don't do this, the dispatch
-					// below will do nothing (because routeName wouldn't change)
-					// Then we wait a bit for the state to be set correctly, and
-					// finally we go to the new note.
-					this.props.dispatch({
-						type: 'NAV_BACK',
-					});
-
-					setTimeout(() => {
-						this.props.dispatch({
-							type: 'NAV_GO',
-							routeName: 'Note',
-							noteId: newNote.id,
-						});
-					}, 5);
-				}
-
-			} catch(e) {
-				reg.logger().error('Error in ShareExtension.data', e);
-			}
-		}
-
-		BackButtonService.initialize(this.backButtonHandler_);
-
-		AlarmService.setInAppNotificationHandler(async (alarmId) => {
-			const alarm = await Alarm.load(alarmId);
-			const notification = await Alarm.makeNotification(alarm);
-			this.dropdownAlert_.alertWithType('info', notification.title, notification.body ? notification.body : '');
-		});
-
-		AppState.addEventListener('change', this.onAppStateChange_);
+		}, 100);
 	}
 
 	componentWillUnmount() {
 		AppState.removeEventListener('change', this.onAppStateChange_);
 	}
 
-	componentDidUpdate(prevProps) {
+	async componentDidUpdate(prevProps) {
 		if (this.props.showSideMenu !== prevProps.showSideMenu) {
 			Animated.timing(this.state.sideMenuContentOpacity, {
 				toValue: this.props.showSideMenu ? 0.5 : 0,
@@ -688,18 +714,32 @@ class AppComponent extends React.Component {
 		});
 	}
 
+	renderStartupScreen() {
+		return (
+			<View style={{ alignItems: 'center', justifyContent: 'center', flex: 1 }}>
+				<View style={{ alignItems: 'center' }}>
+					<Image style={{ marginBottom: 5 }} source={require('./images/StartUpIcon.png')} />
+					<Text style={{ color: '#444444' }}>{this.state.initMessage}</Text>
+				</View>
+			</View>
+		);
+	}
+
 	render() {
-		if (this.props.appState != 'ready') return null;
+		if (this.props.appState != 'ready') {
+			return this.renderStartupScreen();
+		}
+
 		const theme = themeStyle(this.props.theme);
 
 		let sideMenuContent = null;
 		let menuPosition = 'left';
 
 		if (this.props.routeName === 'Note') {
-			sideMenuContent = <SafeAreaView style={{flex:1, backgroundColor: theme.backgroundColor}}><SideMenuContentNote options={this.props.noteSideMenuOptions}/></SafeAreaView>;
+			sideMenuContent = <SafeAreaView style={{ flex: 1, backgroundColor: theme.backgroundColor }}><SideMenuContentNote options={this.props.noteSideMenuOptions}/></SafeAreaView>;
 			menuPosition = 'right';
 		} else {
-			sideMenuContent = <SafeAreaView style={{flex:1, backgroundColor: theme.backgroundColor}}><SideMenuContent/></SafeAreaView>;
+			sideMenuContent = <SafeAreaView style={{ flex: 1, backgroundColor: theme.backgroundColor }}><SideMenuContent/></SafeAreaView>;
 		}
 
 		const appNavInit = {
@@ -710,33 +750,41 @@ class AppComponent extends React.Component {
 			OneDriveLogin: { screen: OneDriveLoginScreen },
 			DropboxLogin: { screen: DropboxLoginScreen },
 			EncryptionConfig: { screen: EncryptionConfigScreen },
+			UpgradeSyncTarget: { screen: UpgradeSyncTargetScreen },
 			Log: { screen: LogScreen },
 			Status: { screen: StatusScreen },
 			Search: { screen: SearchScreen },
 			Config: { screen: ConfigScreen },
 		};
 
+		const statusBarStyle = theme.appearance === 'light' ? 'dark-content' : 'light-content';
+
 		return (
-			<SideMenu
-				menu={sideMenuContent}
-				menuPosition={menuPosition}
-				onChange={(isOpen) => this.sideMenu_change(isOpen)}
-				onSliding={(percent) => {
-					this.props.dispatch({
-						type: 'SIDE_MENU_OPEN_PERCENT',
-						value: percent,
-					});
-				}}
+			<View style={{ flex: 1, backgroundColor: theme.backgroundColor }}>
+				<SideMenu
+					menu={sideMenuContent}
+					edgeHitWidth={5}
+					menuPosition={menuPosition}
+					onChange={(isOpen) => this.sideMenu_change(isOpen)}
+					onSliding={(percent) => {
+						this.props.dispatch({
+							type: 'SIDE_MENU_OPEN_PERCENT',
+							value: percent,
+						});
+					}}
 				>
-				<MenuContext style={{ flex: 1 }}>
-					<SafeAreaView style={{flex:0, backgroundColor: theme.raisedBackgroundColor}} />
-					<SafeAreaView style={{flex:1, backgroundColor: theme.backgroundColor}}>
-						<AppNav screens={appNavInit} />
-					</SafeAreaView>
-					<DropdownAlert ref={ref => this.dropdownAlert_ = ref} tapToCloseEnabled={true} />
-					<Animated.View pointerEvents='none' style={{position:'absolute', backgroundColor:'black', opacity: this.state.sideMenuContentOpacity, width: '100%', height: '100%'}}/>
-				</MenuContext>
-			</SideMenu>
+					<StatusBar barStyle={statusBarStyle} />
+					<MenuContext style={{ flex: 1, backgroundColor: theme.backgroundColor }}>
+						<SafeAreaView style={{ flex: 1 }}>
+							<View style={{ flex: 1, backgroundColor: theme.backgroundColor }}>
+								<AppNav screens={appNavInit} />
+							</View>
+							<DropdownAlert ref={ref => this.dropdownAlert_ = ref} tapToCloseEnabled={true} />
+							<Animated.View pointerEvents='none' style={{ position: 'absolute', backgroundColor: 'black', opacity: this.state.sideMenuContentOpacity, width: '100%', height: '120%' }}/>
+						</SafeAreaView>
+					</MenuContext>
+				</SideMenu>
+			</View>
 		);
 	}
 }

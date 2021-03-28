@@ -1,9 +1,10 @@
-import React, { Component } from 'react';
-import { Keyboard, View, Button, Text, StyleSheet, Linking, Image } from 'react-native';
+import React from 'react';
+import { View } from 'react-native';
 import PopupDialog, { DialogTitle, DialogButton } from 'react-native-popup-dialog';
-import DatePicker from 'react-native-datepicker'
+import DatePicker from 'react-native-datepicker';
 import moment from 'moment';
 import { _ } from 'lib/locale.js';
+const { time } = require('lib/time-utils.js');
 
 class SelectDateTimeDialog extends React.PureComponent {
 
@@ -21,7 +22,7 @@ class SelectDateTimeDialog extends React.PureComponent {
 			this.setState({ date: newProps.date });
 		}
 
-		if ('shown' in newProps) {
+		if ('shown' in newProps && newProps.shown != this.shown_) {
 			this.show(newProps.shown);
 		}
 	}
@@ -41,7 +42,7 @@ class SelectDateTimeDialog extends React.PureComponent {
 	}
 
 	dateTimeFormat() {
-		return "MM/DD/YYYY HH:mm";
+		return time.dateTimeFormat();
 	}
 
 	stringToDate(s) {
@@ -61,12 +62,12 @@ class SelectDateTimeDialog extends React.PureComponent {
 	}
 
 	render() {
-		const clearAlarmText = _("Clear alarm"); // For unknown reasons, this particular string doesn't get translated if it's directly in the text property below
+		const clearAlarmText = _('Clear alarm'); // For unknown reasons, this particular string doesn't get translated if it's directly in the text property below
 
 		const popupActions = [
-			<DialogButton text={_("Save alarm")} align="center" onPress={() => this.onAccept()} key="saveButton" />,
+			<DialogButton text={_('Save alarm')} align="center" onPress={() => this.onAccept()} key="saveButton" />,
 			<DialogButton text={clearAlarmText} align="center" onPress={() => this.onClear()} key="clearButton" />,
-			<DialogButton text={_("Cancel")} align="center" onPress={() => this.onReject()} key="cancelButton" />,
+			<DialogButton text={_('Cancel')} align="center" onPress={() => this.onReject()} key="cancelButton" />,
 		];
 
 		return (
@@ -77,8 +78,8 @@ class SelectDateTimeDialog extends React.PureComponent {
 				dismissOnTouchOutside={false}
 				width={0.9}
 				height={350}
-				>
-				<View style={{flex:1, margin: 20, alignItems:'center'}}>
+			>
+				<View style={{ flex: 1, margin: 20, alignItems: 'center' }}>
 					<DatePicker
 						date={this.state.date}
 						mode="datetime"
@@ -87,7 +88,7 @@ class SelectDateTimeDialog extends React.PureComponent {
 						confirmBtnText={_('Confirm')}
 						cancelBtnText={_('Cancel')}
 						onDateChange={(date) => { this.setState({ date: this.stringToDate(date) }); }}
-						style={{width:300}}
+						style={{ width: 300 }}
 						customStyles={{
 							btnConfirm: {
 								paddingVertical: 0,
@@ -104,4 +105,5 @@ class SelectDateTimeDialog extends React.PureComponent {
 
 }
 
+// eslint-disable-next-line import/prefer-default-export
 export { SelectDateTimeDialog };

@@ -1,11 +1,11 @@
-const { execCommand, githubRelease, handleCommitHook, githubOauthToken } = require('./tool-utils.js');
+const { execCommand } = require('./tool-utils.js');
 const path = require('path');
 const fs = require('fs-extra');
 const moment = require('moment');
 
 const rootDir = path.dirname(__dirname);
-const appDir = rootDir + '/CliClient';
-const changelogPath = rootDir + '/readme/changelog_cli.md';
+const appDir = `${rootDir}/CliClient`;
+const changelogPath = `${rootDir}/readme/changelog_cli.md`;
 
 async function insertChangelog(tag, changelog) {
 	const currentText = await fs.readFile(changelogPath, 'UTF-8');
@@ -30,9 +30,10 @@ async function insertChangelog(tag, changelog) {
 
 	const header = [
 		'##',
-		'[' + tag + '](https://github.com/laurent22/joplin/releases/tag/' + tag + ')',
+		`[${tag}](https://github.com/laurent22/joplin/releases/tag/${tag})`,
 		'-',
-		moment.utc().format('YYYY-MM-DD\THH:mm:ss') + 'Z',
+		// eslint-disable-next-line no-useless-escape
+		`${moment.utc().format('YYYY-MM-DD\THH:mm:ss')}Z`,
 	];
 
 	let newLines = [];
@@ -49,32 +50,23 @@ async function insertChangelog(tag, changelog) {
 // Start with node Tools/release-cli.js --changelog-from cli-v1.0.126
 // to specify from where the changelog should be created
 async function main() {
-	const argv = require('yargs').argv;
-
 	process.chdir(appDir);
 
-	const packageJson = await fs.readFile('package.json', 'UTF-8'); 
-	const packageConf = JSON.parse(packageJson);
-
-	const previousVersion = 'v' + packageConf.version;
-	let changelogFrom = 'cli-' + previousVersion;
-
-	if (argv.changelogFrom) changelogFrom = argv.changelogFrom;
-
 	const newVersion = await execCommand('npm version patch');
-	console.info('Building ' + newVersion + '...');
-	const newTag = 'cli-' + newVersion;
-	
+	console.info(`Building ${newVersion}...`);
+	const newTag = `cli-${newVersion}`;
+
+	await execCommand('git pull');
 	await execCommand('touch app/main.js');
-	await execCommand('bash build.sh');
-	await execCommand('cp package.json build/');
+	await execCommand('npm run build');
+	// await execCommand('cp package.json build/');
 	await execCommand('cp ../README.md build/');
-	
-	process.chdir(appDir + '/build');
+
+	process.chdir(`${appDir}/build`);
 
 	await execCommand('npm publish');
 
-	const changelog = await execCommand('node ' + rootDir + '/Tools/git-changelog ' + changelogFrom);
+	const changelog = await execCommand(`node ${rootDir}/Tools/git-changelog ${newTag}`);
 
 	const newChangelog = await insertChangelog(newTag, changelog);
 
@@ -83,9 +75,10 @@ async function main() {
 	const defaultEditor = await execCommand('echo $EDITOR');
 
 	const finalCmds = [
+		'git pull',
 		'git add -A',
-		'git commit -m "CLI ' + newVersion + '"',
-		'git tag "cli-' + newVersion + '"',
+		`git commit -m "CLI ${newVersion}"`,
+		`git tag "cli-${newVersion}"`,
 		'git push',
 		'git push --tags',
 	];
@@ -93,7 +86,7 @@ async function main() {
 	console.info('');
 	console.info('Verify that the changelog is correct:');
 	console.info('');
-	console.info(defaultEditor + ' "' + changelogPath + '"');
+	console.info(`${defaultEditor} "${changelogPath}"`);
 	console.info('');
 	console.info('Then run these commands:');
 	console.info('');

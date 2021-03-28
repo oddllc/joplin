@@ -1,6 +1,7 @@
-const React = require('react'); const Component = React.Component;
+const React = require('react');
+
 const { connect } = require('react-redux');
-const { Platform, View, Text, Button, StyleSheet, TouchableOpacity, Image, ScrollView, Dimensions } = require('react-native');
+const { View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, Dimensions } = require('react-native');
 const Icon = require('react-native-vector-icons/Ionicons').default;
 const { BackButtonService } = require('lib/services/back-button.js');
 const NavService = require('lib/services/NavService.js');
@@ -9,16 +10,12 @@ const { _ } = require('lib/locale.js');
 const Setting = require('lib/models/Setting.js');
 const Note = require('lib/models/Note.js');
 const Folder = require('lib/models/Folder.js');
-const { FileApi } = require('lib/file-api.js');
-const { FileApiDriverOneDrive } = require('lib/file-api-driver-onedrive.js');
-const { reg } = require('lib/registry.js');
 const { themeStyle } = require('lib/components/global-style.js');
-const { ItemList } = require('lib/components/ItemList.js');
 const { Dropdown } = require('lib/components/Dropdown.js');
-const { time } = require('lib/time-utils');
-const RNFS = require('react-native-fs');
 const { dialogs } = require('lib/dialogs.js');
 const DialogBox = require('react-native-dialogbox').default;
+
+Icon.loadFont();
 
 // Rather than applying a padding to the whole bar, it is applied to each
 // individual component (button, picker, etc.) so that the touchable areas
@@ -27,7 +24,6 @@ const DialogBox = require('react-native-dialogbox').default;
 const PADDING_V = 10;
 
 class ScreenHeaderComponent extends React.PureComponent {
-
 	constructor() {
 		super();
 		this.styles_ = {};
@@ -40,24 +36,23 @@ class ScreenHeaderComponent extends React.PureComponent {
 
 		const theme = themeStyle(themeId);
 
-		let styleObject = {
+		const styleObject = {
 			container: {
 				flexDirection: 'column',
-				backgroundColor: theme.raisedBackgroundColor,
+				backgroundColor: theme.backgroundColor2,
 				alignItems: 'center',
 				shadowColor: '#000000',
 				elevation: 5,
-				paddingTop: Platform.OS === 'ios' ? 15 : 0, // Extra padding for iOS because the top icons are there
 			},
 			divider: {
 				borderBottomWidth: 1,
 				borderColor: theme.dividerColor,
-				backgroundColor: "#0000ff"
+				backgroundColor: '#0000ff',
 			},
 			sideMenuButton: {
 				flex: 1,
 				alignItems: 'center',
-				backgroundColor: theme.raisedBackgroundColor,
+				backgroundColor: theme.backgroundColor2,
 				paddingLeft: theme.marginLeft,
 				paddingRight: 5,
 				marginRight: 2,
@@ -66,9 +61,9 @@ class ScreenHeaderComponent extends React.PureComponent {
 			},
 			iconButton: {
 				flex: 1,
-				backgroundColor: theme.raisedBackgroundColor,
-				paddingLeft: 15,
-				paddingRight: 15,
+				backgroundColor: theme.backgroundColor2,
+				paddingLeft: 10,
+				paddingRight: 10,
 				paddingTop: PADDING_V,
 				paddingBottom: PADDING_V,
 			},
@@ -78,18 +73,18 @@ class ScreenHeaderComponent extends React.PureComponent {
 				alignItems: 'center',
 				padding: 10,
 				borderWidth: 1,
-				borderColor: theme.raisedHighlightedColor,
+				borderColor: theme.colorBright2,
 				borderRadius: 4,
 				marginRight: 8,
 			},
 			saveButtonText: {
 				textAlignVertical: 'center',
-				color: theme.raisedHighlightedColor,
+				color: theme.colorBright2,
 				fontWeight: 'bold',
 			},
 			savedButtonIcon: {
 				fontSize: 20,
-				color: theme.raisedHighlightedColor,
+				color: theme.colorBright2,
 				width: 18,
 				height: 18,
 			},
@@ -101,11 +96,11 @@ class ScreenHeaderComponent extends React.PureComponent {
 				fontSize: 30,
 				paddingLeft: 10,
 				paddingRight: theme.marginRight,
-				color: theme.raisedColor,
+				color: theme.color2,
 				fontWeight: 'bold',
 			},
 			contextMenu: {
-				backgroundColor: theme.raisedBackgroundColor,
+				backgroundColor: theme.backgroundColor2,
 			},
 			contextMenuItem: {
 				backgroundColor: theme.backgroundColor,
@@ -125,14 +120,14 @@ class ScreenHeaderComponent extends React.PureComponent {
 				flex: 1,
 				textAlignVertical: 'center',
 				marginLeft: 10,
-				color: theme.raisedHighlightedColor,
+				color: theme.colorBright2,
 				fontWeight: 'bold',
 				fontSize: theme.fontSize,
 				paddingTop: 15,
 				paddingBottom: 15,
 			},
 			warningBox: {
-				backgroundColor: "#ff9900",
+				backgroundColor: '#ff9900',
 				flexDirection: 'row',
 				padding: theme.marginLeft,
 			},
@@ -141,13 +136,14 @@ class ScreenHeaderComponent extends React.PureComponent {
 		styleObject.topIcon = Object.assign({}, theme.icon);
 		styleObject.topIcon.flex = 1;
 		styleObject.topIcon.textAlignVertical = 'center';
-		styleObject.topIcon.color = theme.raisedColor;
+		styleObject.topIcon.color = theme.colorBright2;
 
 		styleObject.backButton = Object.assign({}, styleObject.iconButton);
 		styleObject.backButton.marginRight = 1;
 
 		styleObject.backButtonDisabled = Object.assign({}, styleObject.backButton, { opacity: theme.disabledOpacity });
 		styleObject.saveButtonDisabled = Object.assign({}, styleObject.saveButton, { opacity: theme.disabledOpacity });
+		styleObject.iconButtonDisabled = Object.assign({}, styleObject.iconButton, { opacity: theme.disabledOpacity });
 
 		this.styles_[themeId] = StyleSheet.create(styleObject);
 		return this.styles_[themeId];
@@ -160,13 +156,27 @@ class ScreenHeaderComponent extends React.PureComponent {
 	async backButton_press() {
 		if (this.props.noteSelectionEnabled) {
 			this.props.dispatch({ type: 'NOTE_SELECTION_END' });
-		} else { 
+		} else {
 			await BackButtonService.back();
-		}	
+		}
+	}
+
+	selectAllButton_press() {
+		this.props.dispatch({ type: 'NOTE_SELECT_ALL_TOGGLE' });
 	}
 
 	searchButton_press() {
 		NavService.go('Search');
+	}
+
+	async duplicateButton_press() {
+		const noteIds = this.props.selectedNoteIds;
+
+		// Duplicate all selected notes. ensureUniqueTitle is set to true to use the
+		// original note's name as a root for the new unique identifier.
+		await Note.duplicateMultipleNotes(noteIds, { ensureUniqueTitle: true });
+
+		this.props.dispatch({ type: 'NOTE_SELECTION_END' });
 	}
 
 	async deleteButton_press() {
@@ -181,7 +191,7 @@ class ScreenHeaderComponent extends React.PureComponent {
 	}
 
 	menu_select(value) {
-		if (typeof(value) == 'function') {
+		if (typeof value == 'function') {
 			value();
 		}
 	}
@@ -194,17 +204,24 @@ class ScreenHeaderComponent extends React.PureComponent {
 		NavService.go('Status');
 	}
 
-	warningBox_press() {
-		NavService.go('EncryptionConfig');
+	warningBox_press(event) {
+		NavService.go(event.screen);
+	}
+
+	renderWarningBox(screen, message) {
+		return (
+			<TouchableOpacity key={screen} style={this.styles().warningBox} onPress={() => this.warningBox_press({ screen: screen })} activeOpacity={0.8}>
+				<Text style={{ flex: 1 }}>{message}</Text>
+			</TouchableOpacity>
+		);
 	}
 
 	render() {
-
 		function sideMenuButton(styles, onPress) {
 			return (
 				<TouchableOpacity onPress={onPress}>
 					<View style={styles.sideMenuButton}>
-						<Icon name='md-menu' style={styles.topIcon} />
+						<Icon name="md-menu" style={styles.topIcon} />
 					</View>
 				</TouchableOpacity>
 			);
@@ -214,7 +231,7 @@ class ScreenHeaderComponent extends React.PureComponent {
 			return (
 				<TouchableOpacity onPress={onPress} disabled={disabled}>
 					<View style={disabled ? styles.backButtonDisabled : styles.backButton}>
-						<Icon name='md-arrow-back' style={styles.topIcon} />
+						<Icon name="md-arrow-back" style={styles.topIcon} />
 					</View>
 				</TouchableOpacity>
 			);
@@ -223,12 +240,50 @@ class ScreenHeaderComponent extends React.PureComponent {
 		function saveButton(styles, onPress, disabled, show) {
 			if (!show) return null;
 
-			const icon = disabled ? <Icon name='md-checkmark' style={styles.savedButtonIcon} /> : <Image style={styles.saveButtonIcon} source={require('./SaveIcon.png')} />;
+			const icon = disabled ? <Icon name="md-checkmark" style={styles.savedButtonIcon} /> : <Image style={styles.saveButtonIcon} source={require('./SaveIcon.png')} />;
 
 			return (
-				<TouchableOpacity onPress={onPress} disabled={disabled} style={{ padding:0 }}>
-					<View style={disabled ? styles.saveButtonDisabled : styles.saveButton}>
-						{ icon }
+				<TouchableOpacity onPress={onPress} disabled={disabled} style={{ padding: 0 }}>
+					<View style={disabled ? styles.saveButtonDisabled : styles.saveButton}>{icon}</View>
+				</TouchableOpacity>
+			);
+		}
+
+		const renderTopButton = (options) => {
+			if (!options.visible) return null;
+
+			const icon = <Icon name={options.iconName} style={this.styles().topIcon} />;
+			const viewStyle = options.disabled ? this.styles().iconButtonDisabled : this.styles().iconButton;
+
+			return (
+				<TouchableOpacity onPress={options.onPress} style={{ padding: 0 }} disabled={!!options.disabled}>
+					<View style={viewStyle}>{icon}</View>
+				</TouchableOpacity>
+			);
+		};
+
+		const renderUndoButton = () => {
+			return renderTopButton({
+				iconName: 'md-undo',
+				onPress: this.props.onUndoButtonPress,
+				visible: this.props.showUndoButton,
+				disabled: this.props.undoButtonDisabled,
+			});
+		};
+
+		const renderRedoButton = () => {
+			return renderTopButton({
+				iconName: 'md-redo',
+				onPress: this.props.onRedoButtonPress,
+				visible: this.props.showRedoButton,
+			});
+		};
+
+		function selectAllButton(styles, onPress) {
+			return (
+				<TouchableOpacity onPress={onPress}>
+					<View style={styles.iconButton}>
+						<Icon name="md-checkmark-circle-outline" style={styles.topIcon} />
 					</View>
 				</TouchableOpacity>
 			);
@@ -238,17 +293,27 @@ class ScreenHeaderComponent extends React.PureComponent {
 			return (
 				<TouchableOpacity onPress={onPress}>
 					<View style={styles.iconButton}>
-						<Icon name='md-search' style={styles.topIcon} />
+						<Icon name="md-search" style={styles.topIcon} />
 					</View>
 				</TouchableOpacity>
 			);
 		}
 
-		function deleteButton(styles, onPress) {
+		function deleteButton(styles, onPress, disabled) {
 			return (
-				<TouchableOpacity onPress={onPress}>
-					<View style={styles.iconButton}>
-						<Icon name='md-trash' style={styles.topIcon} />
+				<TouchableOpacity onPress={onPress} disabled={disabled}>
+					<View style={disabled ? styles.iconButtonDisabled : styles.iconButton}>
+						<Icon name="md-trash" style={styles.topIcon} />
+					</View>
+				</TouchableOpacity>
+			);
+		}
+
+		function duplicateButton(styles, onPress, disabled) {
+			return (
+				<TouchableOpacity onPress={onPress} disabled={disabled}>
+					<View style={disabled ? styles.iconButtonDisabled : styles.iconButton}>
+						<Icon name="md-copy" style={styles.topIcon} />
 					</View>
 				</TouchableOpacity>
 			);
@@ -258,46 +323,53 @@ class ScreenHeaderComponent extends React.PureComponent {
 			return (
 				<TouchableOpacity onPress={onPress}>
 					<View style={styles.iconButton}>
-						<Icon name='md-funnel' style={styles.topIcon} />
+						<Icon name="md-funnel" style={styles.topIcon} />
 					</View>
 				</TouchableOpacity>
 			);
 		}
 
 		let key = 0;
-		let menuOptionComponents = [];
+		const menuOptionComponents = [];
 
 		if (!this.props.noteSelectionEnabled) {
 			for (let i = 0; i < this.props.menuOptions.length; i++) {
-				let o = this.props.menuOptions[i];
+				const o = this.props.menuOptions[i];
 
 				if (o.isDivider) {
-					menuOptionComponents.push(<View key={'menuOption_' + key++} style={this.styles().divider}/>);
+					menuOptionComponents.push(<View key={`menuOption_${key++}`} style={this.styles().divider} />);
 				} else {
 					menuOptionComponents.push(
-						<MenuOption value={o.onPress} key={'menuOption_' + key++} style={this.styles().contextMenuItem}>
+						<MenuOption value={o.onPress} key={`menuOption_${key++}`} style={this.styles().contextMenuItem}>
 							<Text style={this.styles().contextMenuItemText}>{o.title}</Text>
-						</MenuOption>);
+						</MenuOption>
+					);
 				}
 			}
 
 			if (menuOptionComponents.length) {
-				menuOptionComponents.push(<View key={'menuOption_' + key++} style={this.styles().divider}/>);
+				menuOptionComponents.push(<View key={`menuOption_${key++}`} style={this.styles().divider} />);
 			}
 		} else {
 			menuOptionComponents.push(
 				<MenuOption value={() => this.deleteButton_press()} key={'menuOption_delete'} style={this.styles().contextMenuItem}>
 					<Text style={this.styles().contextMenuItemText}>{_('Delete')}</Text>
-				</MenuOption>);
+				</MenuOption>
+			);
+
+			menuOptionComponents.push(
+				<MenuOption value={() => this.duplicateButton_press()} key={'menuOption_duplicate'} style={this.styles().contextMenuItem}>
+					<Text style={this.styles().contextMenuItemText}>{_('Duplicate')}</Text>
+				</MenuOption>
+			);
 		}
 
-		const createTitleComponent = () => {
+		const createTitleComponent = (disabled) => {
 			const themeId = Setting.value('theme');
 			const theme = themeStyle(themeId);
 			const folderPickerOptions = this.props.folderPickerOptions;
 
 			if (folderPickerOptions && folderPickerOptions.enabled) {
-
 				const addFolderChildren = (folders, pickerItems, indent) => {
 					folders.sort((a, b) => {
 						const aTitle = a && a.title ? a.title : '';
@@ -307,34 +379,36 @@ class ScreenHeaderComponent extends React.PureComponent {
 
 					for (let i = 0; i < folders.length; i++) {
 						const f = folders[i];
-						pickerItems.push({ label: '      '.repeat(indent) + ' ' + Folder.displayTitle(f), value: f.id });
+						pickerItems.push({ label: `${'      '.repeat(indent)} ${Folder.displayTitle(f)}`, value: f.id });
 						pickerItems = addFolderChildren(f.children, pickerItems, indent + 1);
 					}
 
 					return pickerItems;
-				}
+				};
 
-				const titlePickerItems = (mustSelect) => {
+				const titlePickerItems = mustSelect => {
 					const folders = this.props.folders.filter(f => f.id !== Folder.conflictFolderId());
 					let output = [];
 					if (mustSelect) output.push({ label: _('Move to notebook...'), value: null });
 					const folderTree = Folder.buildTree(folders);
 					output = addFolderChildren(folderTree, output, 0);
 					return output;
-				}
+				};
 
 				return (
 					<Dropdown
 						items={titlePickerItems(!!folderPickerOptions.mustSelect)}
 						itemHeight={35}
+						disabled={disabled}
 						labelTransform="trim"
-						selectedValue={('selectedFolderId' in folderPickerOptions) ? folderPickerOptions.selectedFolderId : null}
+						selectedValue={'selectedFolderId' in folderPickerOptions ? folderPickerOptions.selectedFolderId : null}
 						itemListStyle={{
 							backgroundColor: theme.backgroundColor,
 						}}
 						headerStyle={{
-							color: theme.raisedHighlightedColor,
+							color: theme.colorBright2,
 							fontSize: theme.fontSize,
+							opacity: disabled ? theme.disabledOpacity : 1,
 						}}
 						itemStyle={{
 							color: theme.color,
@@ -367,87 +441,104 @@ class ScreenHeaderComponent extends React.PureComponent {
 					/>
 				);
 			} else {
-				let title = 'title' in this.props && this.props.title !== null ? this.props.title : '';
-				return <Text style={this.styles().titleText}>{title}</Text>
+				const title = 'title' in this.props && this.props.title !== null ? this.props.title : '';
+				return <Text ellipsizeMode={'tail'} numberOfLines={1} style={this.styles().titleText}>{title}</Text>;
 			}
-		}
+		};
 
-		const warningComp = this.props.showMissingMasterKeyMessage ? (
-			<TouchableOpacity style={this.styles().warningBox} onPress={() => this.warningBox_press()} activeOpacity={0.8}>
-				<Text style={{flex:1}}>{_('Press to set the decryption password.')}</Text>
-			</TouchableOpacity>
-		) : null;
+		const warningComps = [];
+
+		if (this.props.showMissingMasterKeyMessage) warningComps.push(this.renderWarningBox('EncryptionConfig', _('Press to set the decryption password.')));
+		if (this.props.hasDisabledSyncItems) warningComps.push(this.renderWarningBox('Status', _('Some items cannot be synchronised. Press for more info.')));
+		if (this.props.shouldUpgradeSyncTarget && this.props.showShouldUpgradeSyncTargetMessage !== false) warningComps.push(this.renderWarningBox('UpgradeSyncTarget', _('The sync target needs to be upgraded. Press this banner to proceed.')));
 
 		const showSideMenuButton = !!this.props.showSideMenuButton && !this.props.noteSelectionEnabled;
+		const showSelectAllButton = this.props.noteSelectionEnabled;
 		const showSearchButton = !!this.props.showSearchButton && !this.props.noteSelectionEnabled;
 		const showContextMenuButton = this.props.showContextMenuButton !== false;
 		const showBackButton = !!this.props.noteSelectionEnabled || this.props.showBackButton !== false;
 
 		let backButtonDisabled = !this.props.historyCanGoBack;
-		if (!!this.props.noteSelectionEnabled) backButtonDisabled = false;
+		if (this.props.noteSelectionEnabled) backButtonDisabled = false;
+		const headerItemDisabled = !this.props.selectedNoteIds.length > 0;
 
-		const titleComp = createTitleComponent();
+		const titleComp = createTitleComponent(headerItemDisabled);
 		const sideMenuComp = !showSideMenuButton ? null : sideMenuButton(this.styles(), () => this.sideMenuButton_press());
 		const backButtonComp = !showBackButton ? null : backButton(this.styles(), () => this.backButton_press(), backButtonDisabled);
+		const selectAllButtonComp = !showSelectAllButton ? null : selectAllButton(this.styles(), () => this.selectAllButton_press());
 		const searchButtonComp = !showSearchButton ? null : searchButton(this.styles(), () => this.searchButton_press());
-		const deleteButtonComp = this.props.noteSelectionEnabled ? deleteButton(this.styles(), () => this.deleteButton_press()) : null;
+		const deleteButtonComp = this.props.noteSelectionEnabled ? deleteButton(this.styles(), () => this.deleteButton_press(), headerItemDisabled) : null;
+		const duplicateButtonComp = this.props.noteSelectionEnabled ? duplicateButton(this.styles(), () => this.duplicateButton_press(), headerItemDisabled) : null;
 		const sortButtonComp = !this.props.noteSelectionEnabled && this.props.sortButton_press ? sortButton(this.styles(), () => this.props.sortButton_press()) : null;
 		const windowHeight = Dimensions.get('window').height - 50;
 
 		const contextMenuStyle = { paddingTop: PADDING_V, paddingBottom: PADDING_V };
-		
-		// HACK: if this button is removed during selection mode, the header layout is broken, so for now just make it 1 pixel large (normally it should be hidden)
-		if (!!this.props.noteSelectionEnabled) contextMenuStyle.width = 1;
 
-		const menuComp = !menuOptionComponents.length || !showContextMenuButton ? null : (
-			<Menu onSelect={(value) => this.menu_select(value)} style={this.styles().contextMenu}>
-				<MenuTrigger style={contextMenuStyle}>
-					<Icon name='md-more' style={this.styles().contextMenuTrigger} />
-				</MenuTrigger>
-				<MenuOptions>
-					<ScrollView style={{ maxHeight: windowHeight }}>
-						{ menuOptionComponents }
-					</ScrollView>
-				</MenuOptions>
-			</Menu>
-		);
+		// HACK: if this button is removed during selection mode, the header layout is broken, so for now just make it 1 pixel large (normally it should be hidden)
+		if (this.props.noteSelectionEnabled) contextMenuStyle.width = 1;
+
+		const menuComp =
+			!menuOptionComponents.length || !showContextMenuButton ? null : (
+				<Menu onSelect={value => this.menu_select(value)} style={this.styles().contextMenu}>
+					<MenuTrigger style={contextMenuStyle}>
+						<Icon name="md-more" style={this.styles().contextMenuTrigger} />
+					</MenuTrigger>
+					<MenuOptions>
+						<ScrollView style={{ maxHeight: windowHeight }}>{menuOptionComponents}</ScrollView>
+					</MenuOptions>
+				</Menu>
+			);
 
 		return (
-			<View style={this.styles().container} >
-				<View style={{flexDirection:'row', alignItems: 'center'}}>
-					{ sideMenuComp }
-					{ backButtonComp }
-					{ saveButton(this.styles(), () => { if (this.props.onSaveButtonPress) this.props.onSaveButtonPress() }, this.props.saveButtonDisabled === true, this.props.showSaveButton === true) }
-					{ titleComp }
-					{ searchButtonComp }
-					{ deleteButtonComp }
-					{ sortButtonComp }
-					{ menuComp }
+			<View style={this.styles().container}>
+				<View style={{ flexDirection: 'row', alignItems: 'center' }}>
+					{sideMenuComp}
+					{backButtonComp}
+					{renderUndoButton(this.styles())}
+					{renderRedoButton(this.styles())}
+					{saveButton(
+						this.styles(),
+						() => {
+							if (this.props.onSaveButtonPress) this.props.onSaveButtonPress();
+						},
+						this.props.saveButtonDisabled === true,
+						this.props.showSaveButton === true
+					)}
+					{titleComp}
+					{selectAllButtonComp}
+					{searchButtonComp}
+					{deleteButtonComp}
+					{duplicateButtonComp}
+					{sortButtonComp}
+					{menuComp}
 				</View>
-				{ warningComp }
-				<DialogBox ref={dialogbox => { this.dialogbox = dialogbox }}/>
+				{warningComps}
+				<DialogBox
+					ref={dialogbox => {
+						this.dialogbox = dialogbox;
+					}}
+				/>
 			</View>
 		);
 	}
-
 }
 
 ScreenHeaderComponent.defaultProps = {
 	menuOptions: [],
 };
 
-const ScreenHeader = connect(
-	(state) => {
-		return {
-			historyCanGoBack: state.historyCanGoBack,
-			locale: state.settings.locale,
-			folders: state.folders,
-			theme: state.settings.theme,
-			noteSelectionEnabled: state.noteSelectionEnabled,
-			selectedNoteIds: state.selectedNoteIds,
-			showMissingMasterKeyMessage: state.notLoadedMasterKeys.length && state.masterKeys.length,
-		};
-	}
-)(ScreenHeaderComponent)
+const ScreenHeader = connect(state => {
+	return {
+		historyCanGoBack: state.historyCanGoBack,
+		locale: state.settings.locale,
+		folders: state.folders,
+		theme: state.settings.theme,
+		noteSelectionEnabled: state.noteSelectionEnabled,
+		selectedNoteIds: state.selectedNoteIds,
+		showMissingMasterKeyMessage: state.notLoadedMasterKeys.length && state.masterKeys.length,
+		hasDisabledSyncItems: state.hasDisabledSyncItems,
+		shouldUpgradeSyncTarget: state.settings['sync.upgradeState'] === Setting.SYNC_UPGRADE_STATE_SHOULD_DO,
+	};
+})(ScreenHeaderComponent);
 
 module.exports = { ScreenHeader };

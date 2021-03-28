@@ -1,10 +1,8 @@
 const { time } = require('lib/time-utils.js');
-const JoplinError = require('lib/JoplinError');
 const Setting = require('lib/models/Setting');
 const { Logger } = require('lib/logger.js');
 
 class TaskQueue {
-
 	constructor(name) {
 		this.waitingTasks_ = [];
 		this.processingTasks_ = {};
@@ -47,7 +45,7 @@ class TaskQueue {
 			this.results_[task.id] = r;
 
 			this.processQueue_();
-		}
+		};
 
 		while (this.waitingTasks_.length > 0 && Object.keys(this.processingTasks_).length < this.concurrency()) {
 			if (this.stopping_) break;
@@ -55,19 +53,22 @@ class TaskQueue {
 			const task = this.waitingTasks_.splice(0, 1)[0];
 			this.processingTasks_[task.id] = task;
 
-			task.callback().then(result => {
-				completeTask(task, result, null);
-			}).catch(error => {
-				if (!error) error = new Error('Unknown error');
-				completeTask(task, null, error);
-			});
+			task
+				.callback()
+				.then(result => {
+					completeTask(task, result, null);
+				})
+				.catch(error => {
+					if (!error) error = new Error('Unknown error');
+					completeTask(task, null, error);
+				});
 		}
 
 		this.processingQueue_ = false;
 	}
 
 	isWaiting(taskId) {
-		return this.waitingTasks_.find(task => task.id === taskId)
+		return this.waitingTasks_.find(task => task.id === taskId);
 	}
 
 	isProcessing(taskId) {
@@ -79,7 +80,7 @@ class TaskQueue {
 	}
 
 	async waitForResult(taskId) {
-		if (!this.isWaiting(taskId) && !this.isProcessing(taskId) && !this.isDone(taskId)) throw new Error('No such task: ' + taskId);
+		if (!this.isWaiting(taskId) && !this.isProcessing(taskId) && !this.isDone(taskId)) throw new Error(`No such task: ${taskId}`);
 
 		while (true) {
 			// if (this.stopping_) {
@@ -98,7 +99,7 @@ class TaskQueue {
 	async stop() {
 		this.stopping_ = true;
 
-		this.logger_.info('TaskQueue.stop: ' + this.name_ + ': waiting for tasks to complete: ' + Object.keys(this.processingTasks_).length);
+		this.logger_.info(`TaskQueue.stop: ${this.name_}: waiting for tasks to complete: ${Object.keys(this.processingTasks_).length}`);
 
 		// In general it's not a big issue if some tasks are still running because
 		// it won't call anything unexpected in caller code, since the caller has
@@ -107,18 +108,17 @@ class TaskQueue {
 		while (Object.keys(this.processingTasks_).length) {
 			await time.sleep(0.1);
 			if (Date.now() - startTime >= 30000) {
-				this.logger_.warn('TaskQueue.stop: ' + this.name_ + ': timed out waiting for task to complete');
+				this.logger_.warn(`TaskQueue.stop: ${this.name_}: timed out waiting for task to complete`);
 				break;
 			}
 		}
 
-		this.logger_.info('TaskQueue.stop: ' + this.name_ + ': Done, waited for ' + (Date.now() - startTime));
+		this.logger_.info(`TaskQueue.stop: ${this.name_}: Done, waited for ${Date.now() - startTime}`);
 	}
 
 	isStopping() {
 		return this.stopping_;
 	}
-
 }
 
 TaskQueue.CONCURRENCY = 5;

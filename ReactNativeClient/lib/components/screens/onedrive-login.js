@@ -1,18 +1,18 @@
-const React = require('react'); const Component = React.Component;
+const React = require('react');
+
 const { View } = require('react-native');
-const { Button, Text } = require('react-native');
-const { WebView } =  require('react-native-webview');
+const { Button } = require('react-native');
+const { WebView } = require('react-native-webview');
 const { connect } = require('react-redux');
-const Setting = require('lib/models/Setting.js');
 const { ScreenHeader } = require('lib/components/screen-header.js');
 const { reg } = require('lib/registry.js');
 const { _ } = require('lib/locale.js');
 const { BaseScreenComponent } = require('lib/components/base-screen.js');
 const parseUri = require('lib/parseUri');
+const { themeStyle } = require('lib/components/global-style.js');
 
 class OneDriveLoginScreenComponent extends BaseScreenComponent {
-	
-	static navigationOptions(options) {
+	static navigationOptions() {
 		return { header: null };
 	}
 
@@ -22,6 +22,16 @@ class OneDriveLoginScreenComponent extends BaseScreenComponent {
 		this.authCode_ = null;
 	}
 
+	styles() {
+		const theme = themeStyle(this.props.theme);
+		return {
+			screen: {
+				flex: 1,
+				backgroundColor: theme.backgroundColor,
+			},
+		};
+	}
+
 	UNSAFE_componentWillMount() {
 		this.setState({
 			webviewUrl: this.startUrl(),
@@ -29,11 +39,17 @@ class OneDriveLoginScreenComponent extends BaseScreenComponent {
 	}
 
 	startUrl() {
-		return reg.syncTarget().api().authCodeUrl(this.redirectUrl());
+		return reg
+			.syncTarget()
+			.api()
+			.authCodeUrl(this.redirectUrl());
 	}
 
 	redirectUrl() {
-		return reg.syncTarget().api().nativeClientRedirectUrl();
+		return reg
+			.syncTarget()
+			.api()
+			.nativeClientRedirectUrl();
 	}
 
 	async webview_load(noIdeaWhatThisIs) {
@@ -44,14 +60,17 @@ class OneDriveLoginScreenComponent extends BaseScreenComponent {
 		const parsedUrl = parseUri(url);
 
 		if (!this.authCode_ && parsedUrl && parsedUrl.queryKey && parsedUrl.queryKey.code) {
-			this.authCode_ = parsedUrl.queryKey.code
+			this.authCode_ = parsedUrl.queryKey.code;
 
 			try {
-				await reg.syncTarget().api().execTokenRequest(this.authCode_, this.redirectUrl(), true);
+				await reg
+					.syncTarget()
+					.api()
+					.execTokenRequest(this.authCode_, this.redirectUrl(), true);
 				this.props.dispatch({ type: 'NAV_BACK' });
 				reg.scheduleSync(0);
 			} catch (error) {
-				alert('Could not login to OneDrive. Please try again\n\n' + error.message + '\n\n' + url);
+				alert(`Could not login to OneDrive. Please try again\n\n${error.message}\n\n${url}`);
 			}
 
 			this.authCode_ = null;
@@ -83,27 +102,35 @@ class OneDriveLoginScreenComponent extends BaseScreenComponent {
 	render() {
 		const source = {
 			uri: this.state.webviewUrl,
-		}
+		};
 
 		return (
 			<View style={this.styles().screen}>
-				<ScreenHeader title={_('Login with OneDrive')}/>
+				<ScreenHeader title={_('Login with OneDrive')} />
 				<WebView
 					source={source}
-					onNavigationStateChange={(o) => { this.webview_load(o); }}
-					onError={() => { this.webview_error(); }}
+					onNavigationStateChange={o => {
+						this.webview_load(o);
+					}}
+					onError={() => {
+						this.webview_error();
+					}}
 				/>
-				<Button title={_("Refresh")} onPress={() => { this.retryButton_click(); }}></Button>
+				<Button
+					title={_('Refresh')}
+					onPress={() => {
+						this.retryButton_click();
+					}}
+				></Button>
 			</View>
 		);
 	}
-
 }
 
-const OneDriveLoginScreen = connect(
-	(state) => {
-		return {};
-	}
-)(OneDriveLoginScreenComponent)
+const OneDriveLoginScreen = connect((state) => {
+	return {
+		theme: state.settings.theme,
+	};
+})(OneDriveLoginScreenComponent);
 
 module.exports = { OneDriveLoginScreen };

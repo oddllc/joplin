@@ -2,7 +2,6 @@ const BaseService = require('lib/services/BaseService.js');
 const Mutex = require('async-mutex').Mutex;
 
 class KvStore extends BaseService {
-
 	static instance() {
 		if (this.instance_) return this.instance_;
 		this.instance_ = new KvStore();
@@ -26,7 +25,7 @@ class KvStore extends BaseService {
 	typeFromValue_(value) {
 		if (typeof value === 'string') return KvStore.TYPE_TEXT;
 		if (typeof value === 'number') return KvStore.TYPE_INT;
-		throw new Error('Unsupported value type: ' + (typeof value));
+		throw new Error(`Unsupported value type: ${typeof value}`);
 	}
 
 	formatValues_(kvs) {
@@ -40,8 +39,8 @@ class KvStore extends BaseService {
 
 	formatValue_(value, type) {
 		if (type === KvStore.TYPE_INT) return Number(value);
-		if (type === KvStore.TYPE_TEXT) return value + '';
-		throw new Error('Unknown type: ' + type);
+		if (type === KvStore.TYPE_TEXT) return `${value}`;
+		throw new Error(`Unknown type: ${type}`);
 	}
 
 	async value(key) {
@@ -57,6 +56,10 @@ class KvStore extends BaseService {
 
 	async deleteValue(key) {
 		await this.db().exec('DELETE FROM key_values WHERE `key` = ?', [key]);
+	}
+
+	async deleteByPrefix(prefix) {
+		await this.db().exec('DELETE FROM key_values WHERE `key` LIKE ?', [`${prefix}%`]);
 	}
 
 	async clear() {
@@ -81,11 +84,11 @@ class KvStore extends BaseService {
 		} catch (error) {
 			release();
 			throw error;
-		}		
+		}
 	}
 
 	async searchByPrefix(prefix) {
-		let results = await this.db().selectAll('SELECT `key`, `value`, `type` FROM key_values WHERE `key` LIKE ?', [prefix + '%']);
+		const results = await this.db().selectAll('SELECT `key`, `value`, `type` FROM key_values WHERE `key` LIKE ?', [`${prefix}%`]);
 		return this.formatValues_(results);
 	}
 
@@ -93,7 +96,6 @@ class KvStore extends BaseService {
 		const r = await this.db().selectOne('SELECT count(*) as total FROM key_values');
 		return r.total ? r.total : 0;
 	}
-
 }
 
 KvStore.TYPE_INT = 1;

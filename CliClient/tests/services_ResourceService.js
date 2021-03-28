@@ -1,3 +1,5 @@
+/* eslint-disable no-unused-vars */
+
 require('app-module-path').addPath(__dirname);
 
 const { time } = require('lib/time-utils.js');
@@ -15,22 +17,20 @@ const fs = require('fs-extra');
 const ArrayUtils = require('lib/ArrayUtils');
 const ObjectUtils = require('lib/ObjectUtils');
 const { shim } = require('lib/shim.js');
-const SearchEngine = require('lib/services/SearchEngine');
+const SearchEngine = require('lib/services/searchengine/SearchEngine');
 
 process.on('unhandledRejection', (reason, p) => {
 	console.log('Unhandled Rejection at: Promise', p, 'reason:', reason);
 });
 
-jasmine.DEFAULT_TIMEOUT_INTERVAL = 10000;
-
 function exportDir() {
-	return __dirname + '/export';
+	return `${__dirname}/export`;
 }
 
 function fieldsEqual(model1, model2, fieldNames) {
 	for (let i = 0; i < fieldNames.length; i++) {
 		const f = fieldNames[i];
-		expect(model1[f]).toBe(model2[f], 'For key ' + f);
+		expect(model1[f]).toBe(model2[f], `For key ${f}`);
 	}
 }
 
@@ -46,10 +46,10 @@ describe('services_ResourceService', function() {
 	it('should delete orphaned resources', asyncTest(async () => {
 		const service = new ResourceService();
 
-		let folder1 = await Folder.save({ title: "folder1" });
+		const folder1 = await Folder.save({ title: 'folder1' });
 		let note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
-		note1 = await shim.attachFileToNote(note1, __dirname + '/../tests/support/photo.jpg');
-		let resource1 = (await Resource.all())[0];
+		note1 = await shim.attachFileToNote(note1, `${__dirname}/../tests/support/photo.jpg`);
+		const resource1 = (await Resource.all())[0];
 		const resourcePath = Resource.fullPath(resource1);
 
 		await service.indexNoteResources();
@@ -77,18 +77,18 @@ describe('services_ResourceService', function() {
 	it('should not delete resource if still associated with at least one note', asyncTest(async () => {
 		const service = new ResourceService();
 
-		let folder1 = await Folder.save({ title: "folder1" });
+		const folder1 = await Folder.save({ title: 'folder1' });
 		let note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
-		let note2 = await Note.save({ title: 'ma deuxième note', parent_id: folder1.id });
-		note1 = await shim.attachFileToNote(note1, __dirname + '/../tests/support/photo.jpg');
-		let resource1 = (await Resource.all())[0];
+		const note2 = await Note.save({ title: 'ma deuxième note', parent_id: folder1.id });
+		note1 = await shim.attachFileToNote(note1, `${__dirname}/../tests/support/photo.jpg`);
+		const resource1 = (await Resource.all())[0];
 
 		await service.indexNoteResources();
 
 		await Note.delete(note1.id);
-		
+
 		await service.indexNoteResources();
-		
+
 		await Note.save({ id: note2.id, body: Resource.markdownTag(resource1) });
 
 		await service.indexNoteResources();
@@ -100,7 +100,7 @@ describe('services_ResourceService', function() {
 
 	it('should not delete a resource that has never been associated with any note, because it probably means the resource came via sync, and associated note has not arrived yet', asyncTest(async () => {
 		const service = new ResourceService();
-		const resource = await shim.createResourceFromPath(__dirname + '/../tests/support/photo.jpg');
+		const resource = await shim.createResourceFromPath(`${__dirname}/../tests/support/photo.jpg`);
 
 		await service.indexNoteResources();
 		await service.deleteOrphanResources(0);
@@ -111,17 +111,17 @@ describe('services_ResourceService', function() {
 	it('should not delete resource if it is used in an IMG tag', asyncTest(async () => {
 		const service = new ResourceService();
 
-		let folder1 = await Folder.save({ title: "folder1" });
+		const folder1 = await Folder.save({ title: 'folder1' });
 		let note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
-		note1 = await shim.attachFileToNote(note1, __dirname + '/../tests/support/photo.jpg');
-		let resource1 = (await Resource.all())[0];
+		note1 = await shim.attachFileToNote(note1, `${__dirname}/../tests/support/photo.jpg`);
+		const resource1 = (await Resource.all())[0];
 
 		await service.indexNoteResources();
 
-		await Note.save({ id: note1.id, body: 'This is HTML: <img src=":/' + resource1.id + '"/>' });
-		
+		await Note.save({ id: note1.id, body: `This is HTML: <img src=":/${resource1.id}"/>` });
+
 		await service.indexNoteResources();
-		
+
 		await service.deleteOrphanResources(0);
 
 		expect(!!(await Resource.load(resource1.id))).toBe(true);
@@ -130,10 +130,10 @@ describe('services_ResourceService', function() {
 	it('should not process twice the same change', asyncTest(async () => {
 		const service = new ResourceService();
 
-		let folder1 = await Folder.save({ title: "folder1" });
+		const folder1 = await Folder.save({ title: 'folder1' });
 		let note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
-		note1 = await shim.attachFileToNote(note1, __dirname + '/../tests/support/photo.jpg');
-		let resource1 = (await Resource.all())[0];
+		note1 = await shim.attachFileToNote(note1, `${__dirname}/../tests/support/photo.jpg`);
+		const resource1 = (await Resource.all())[0];
 
 		await service.indexNoteResources();
 
@@ -161,15 +161,15 @@ describe('services_ResourceService', function() {
 		// - Client 1 syncs
 		// - Client 1 runs resource indexer - but because N1 hasn't been decrypted yet, it found that R1 is no longer associated with any note
 		// - Client 1 decrypts notes, but too late
-		// 
+		//
 		// Eventually R1 is deleted because service thinks that it was at some point associated with a note, but no longer.
 
 		const masterKey = await loadEncryptionMasterKey();
 		await encryptionService().enableEncryption(masterKey, '123456');
 		await encryptionService().loadMasterKeysFromSettings();
-		let folder1 = await Folder.save({ title: "folder1" });
-		let note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
-		await shim.attachFileToNote(note1, __dirname + '/../tests/support/photo.jpg'); // R1
+		const folder1 = await Folder.save({ title: 'folder1' });
+		const note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
+		await shim.attachFileToNote(note1, `${__dirname}/../tests/support/photo.jpg`); // R1
 		await resourceService().indexNoteResources();
 		await synchronizer().start();
 		expect(await allSyncTargetItemsEncrypted()).toBe(true);
@@ -182,7 +182,7 @@ describe('services_ResourceService', function() {
 		await decryptionWorker().start();
 		{
 			const n1 = await Note.load(note1.id);
-			await shim.attachFileToNote(n1, __dirname + '/../tests/support/photo.jpg'); // R2
+			await shim.attachFileToNote(n1, `${__dirname}/../tests/support/photo.jpg`); // R2
 		}
 		await synchronizer().start();
 
@@ -197,9 +197,9 @@ describe('services_ResourceService', function() {
 	it('should double-check if the resource is still linked before deleting it', asyncTest(async () => {
 		SearchEngine.instance().setDb(db()); // /!\ Note that we use the global search engine here, which we shouldn't but will work for now
 
-		let folder1 = await Folder.save({ title: "folder1" });
+		const folder1 = await Folder.save({ title: 'folder1' });
 		let note1 = await Note.save({ title: 'ma note', parent_id: folder1.id });
-		note1 = await shim.attachFileToNote(note1, __dirname + '/../tests/support/photo.jpg');
+		note1 = await shim.attachFileToNote(note1, `${__dirname}/../tests/support/photo.jpg`);
 		await resourceService().indexNoteResources();
 		const bodyWithResource = note1.body;
 		await Note.save({ id: note1.id, body: '' });

@@ -2,7 +2,6 @@ const BaseModel = require('lib/BaseModel.js');
 const Mutex = require('async-mutex').Mutex;
 
 class ItemChange extends BaseModel {
-
 	static tableName() {
 		return 'item_changes';
 	}
@@ -22,10 +21,7 @@ class ItemChange extends BaseModel {
 		const release = await ItemChange.addChangeMutex_.acquire();
 
 		try {
-			await this.db().transactionExecBatch([
-				{ sql: 'DELETE FROM item_changes WHERE item_id = ?', params: [itemId] },
-				{ sql: 'INSERT INTO item_changes (item_type, item_id, type, source, created_time, before_change_item) VALUES (?, ?, ?, ?, ?, ?)', params: [itemType, itemId, type, changeSource, Date.now(), beforeChangeItemJson] },
-			]);
+			await this.db().transactionExecBatch([{ sql: 'DELETE FROM item_changes WHERE item_id = ?', params: [itemId] }, { sql: 'INSERT INTO item_changes (item_type, item_id, type, source, created_time, before_change_item) VALUES (?, ?, ?, ?, ?, ?)', params: [itemType, itemId, type, changeSource, Date.now(), beforeChangeItemJson] }]);
 		} finally {
 			release();
 			ItemChange.saveCalls_.pop();
@@ -40,7 +36,7 @@ class ItemChange extends BaseModel {
 	// Because item changes are recorded in the background, this function
 	// can be used for synchronous code, in particular when unit testing.
 	static async waitForAllSaved() {
-		return new Promise((resolve, reject) => {
+		return new Promise((resolve) => {
 			const iid = setInterval(() => {
 				if (!ItemChange.saveCalls_.length) {
 					clearInterval(iid);
@@ -54,7 +50,6 @@ class ItemChange extends BaseModel {
 		if (!lowestChangeId) return;
 		return this.db().exec('DELETE FROM item_changes WHERE id <= ?', [lowestChangeId]);
 	}
-
 }
 
 ItemChange.addChangeMutex_ = new Mutex();

@@ -1,9 +1,8 @@
 const { BaseCommand } = require('./base-command.js');
 const { app } = require('./app.js');
 const { _ } = require('lib/locale.js');
-const { OneDriveApiNodeUtils } = require('./onedrive-api-node-utils.js');
+const { OneDriveApiNodeUtils } = require('lib/onedrive-api-node-utils.js');
 const Setting = require('lib/models/Setting.js');
-const BaseItem = require('lib/models/BaseItem.js');
 const ResourceFetcher = require('lib/services/ResourceFetcher');
 const { Synchronizer } = require('lib/synchronizer.js');
 const { reg } = require('lib/registry.js');
@@ -12,9 +11,9 @@ const md5 = require('md5');
 const locker = require('proper-lockfile');
 const fs = require('fs-extra');
 const SyncTargetRegistry = require('lib/SyncTargetRegistry');
+const MigrationHandler = require('lib/services/synchronizer/MigrationHandler').default;
 
 class Command extends BaseCommand {
-
 	constructor() {
 		super();
 		this.syncTargetId_ = null;
@@ -33,6 +32,7 @@ class Command extends BaseCommand {
 	options() {
 		return [
 			['--target <target>', _('Sync to provided target (defaults to sync.target config value)')],
+			['--upgrade', _('Upgrade the sync target to the latest version.')],
 		];
 	}
 
@@ -66,21 +66,25 @@ class Command extends BaseCommand {
 		const syncTarget = reg.syncTarget(this.syncTargetId_);
 		const syncTargetMd = SyncTargetRegistry.idToMetadata(this.syncTargetId_);
 
-		if (this.syncTargetId_ === 3 || this.syncTargetId_ === 4) { // OneDrive
+		if (this.syncTargetId_ === 3 || this.syncTargetId_ === 4) {
+			// OneDrive
 			this.oneDriveApiUtils_ = new OneDriveApiNodeUtils(syncTarget.api());
 			const auth = await this.oneDriveApiUtils_.oauthDance({
-				log: (...s) => { return this.stdout(...s); }
+				log: (...s) => {
+					return this.stdout(...s);
+				},
 			});
 			this.oneDriveApiUtils_ = null;
-			
-			Setting.setValue('sync.' + this.syncTargetId_ + '.auth', auth ? JSON.stringify(auth) : null);
+
+			Setting.setValue(`sync.${this.syncTargetId_}.auth`, auth ? JSON.stringify(auth) : null);
 			if (!auth) {
 				this.stdout(_('Authentication was not completed (did not receive an authentication token).'));
 				return false;
 			}
 
 			return true;
-		} else if (syncTargetMd.name === 'dropbox') { // Dropbox
+		} else if (syncTargetMd.name === 'dropbox') {
+			// Dropbox
 			const api = await syncTarget.api();
 			const loginUrl = api.loginUrl();
 			this.stdout(_('To allow Joplin to synchronise with Dropbox, please follow the steps below:'));
@@ -93,7 +97,7 @@ class Command extends BaseCommand {
 			}
 
 			const response = await api.execAuthToken(authCode);
-			Setting.setValue('sync.' + this.syncTargetId_ + '.auth', response.access_token);
+			Setting.setValue(`sync.${this.syncTargetId_}.auth`, response.access_token);
 			api.setAuthToken(response.access_token);
 			return true;
 		}
@@ -117,8 +121,8 @@ class Command extends BaseCommand {
 		this.releaseLockFn_ = null;
 
 		// Lock is unique per profile/database
-		const lockFilePath = require('os').tmpdir() + '/synclock_' + md5(escape(Setting.value('profileDir'))); // https://github.com/pvorb/node-md5/issues/41
-		if (!await fs.pathExists(lockFilePath)) await fs.writeFile(lockFilePath, 'synclock');
+		const lockFilePath = `${require('os').tmpdir()}/synclock_${md5(escape(Setting.value('profileDir')))}`; // https://github.com/pvorb/node-md5/issues/41
+		if (!(await fs.pathExists(lockFilePath))) await fs.writeFile(lockFilePath, 'synclock');
 
 		try {
 			if (await Command.isLocked(lockFilePath)) throw new Error(_('Synchronisation is already in progress.'));
@@ -147,22 +151,22 @@ class Command extends BaseCommand {
 
 			const syncTarget = reg.syncTarget(this.syncTargetId_);
 
-			if (!await syncTarget.isAuthenticated()) {
+			if (!(await syncTarget.isAuthenticated())) {
 				app().gui().showConsole();
 				app().gui().maximizeConsole();
 
 				const authDone = await this.doAuth();
 				if (!authDone) return cleanUp();
 			}
-			
+
 			const sync = await syncTarget.synchronizer();
 
-			let options = {
-				onProgress: (report) => {
-					let lines = Synchronizer.reportToLines(report);
+			const options = {
+				onProgress: report => {
+					const lines = Synchronizer.reportToLines(report);
 					if (lines.length) cliUtils.redraw(lines.join(' '));
 				},
-				onMessage: (msg) => {
+				onMessage: msg => {
 					cliUtils.redrawDone();
 					this.stdout(msg);
 				},
@@ -170,18 +174,46 @@ class Command extends BaseCommand {
 
 			this.stdout(_('Synchronisation target: %s (%s)', Setting.enumOptionLabel('sync.target', this.syncTargetId_), this.syncTargetId_));
 
-			if (!sync) throw new Error(_('Cannot initialize synchroniser.'));
+			if (!sync) throw new Error(_('Cannot initialise synchroniser.'));
+
+			if (args.options.upgrade) {
+				let migrationError = null;
+
+				try {
+					const migrationHandler = new MigrationHandler(
+						sync.api(),
+						sync.lockHandler(),
+						Setting.value('appType'),
+						Setting.value('clientId')
+					);
+
+					migrationHandler.setLogger(cliUtils.stdoutLogger(this.stdout.bind(this)));
+
+					await migrationHandler.upgrade();
+				} catch (error) {
+					migrationError = error;
+				}
+
+				if (!migrationError) {
+					Setting.setValue('sync.upgradeState', Setting.SYNC_UPGRADE_STATE_IDLE);
+					await Setting.saveAll();
+				}
+
+				if (migrationError) throw migrationError;
+
+				return cleanUp();
+			}
 
 			this.stdout(_('Starting synchronisation...'));
 
-			const contextKey = 'sync.' + this.syncTargetId_ + '.context';
+			const contextKey = `sync.${this.syncTargetId_}.context`;
 			let context = Setting.value(contextKey);
 
 			context = context ? JSON.parse(context) : {};
 			options.context = context;
 
 			try {
-				let newContext = await sync.start(options);
+				const newContext = await sync.start(options);
 				Setting.setValue(contextKey, JSON.stringify(newContext));
 			} catch (error) {
 				if (error.code == 'alreadyStarted') {
@@ -193,7 +225,7 @@ class Command extends BaseCommand {
 
 			// When using the tool in command line mode, the ResourceFetcher service is
 			// not going to be running in the background, so the resources need to be
-			// explicitely downloaded below.
+			// explicitly downloaded below.
 			if (!app().hasGui()) {
 				this.stdout(_('Downloading resources...'));
 				await ResourceFetcher.instance().fetchAll();
@@ -204,6 +236,12 @@ class Command extends BaseCommand {
 		} catch (error) {
 			cleanUp();
 			throw error;
+		}
+
+		if (Setting.value('sync.upgradeState') > Setting.SYNC_UPGRADE_STATE_IDLE) {
+			this.stdout(`/!\\ ${_('Sync target must be upgraded! Run `%s` to proceed.', 'sync --upgrade')}`);
+			app().gui().showConsole();
+			app().gui().maximizeConsole();
 		}
 
 		cleanUp();
@@ -237,7 +275,6 @@ class Command extends BaseCommand {
 	cancellable() {
 		return true;
 	}
-
 }
 
 module.exports = Command;

@@ -1,8 +1,9 @@
-const React = require('react'); const Component = React.Component;
-const { Platform, TouchableOpacity, Linking, View, Switch, StyleSheet, Text, Button, ScrollView, TextInput, Alert } = require('react-native');
+import Slider from '@react-native-community/slider';
+const React = require('react');
+const { Platform, TouchableOpacity, Linking, View, Switch, StyleSheet, Text, Button, ScrollView, TextInput, Alert, PermissionsAndroid } = require('react-native');
 const { connect } = require('react-redux');
 const { ScreenHeader } = require('lib/components/screen-header.js');
-const { _, setLocale } = require('lib/locale.js');
+const { _ } = require('lib/locale.js');
 const { BaseScreenComponent } = require('lib/components/base-screen.js');
 const { Dropdown } = require('lib/components/Dropdown.js');
 const { themeStyle } = require('lib/components/global-style.js');
@@ -14,15 +15,13 @@ const NavService = require('lib/services/NavService.js');
 const VersionInfo = require('react-native-version-info').default;
 const { ReportService } = require('lib/services/report.js');
 const { time } = require('lib/time-utils');
-const SearchEngine = require('lib/services/SearchEngine');
+const { shim } = require('lib/shim');
+const SearchEngine = require('lib/services/searchengine/SearchEngine');
 const RNFS = require('react-native-fs');
-
-import { PermissionsAndroid } from 'react-native';
-import Slider from '@react-native-community/slider';
+const checkPermissions = require('lib/checkPermissions.js').default;
 
 class ConfigScreenComponent extends BaseScreenComponent {
-
-	static navigationOptions(options) {
+	static navigationOptions() {
 		return { header: null };
 	}
 
@@ -32,32 +31,23 @@ class ConfigScreenComponent extends BaseScreenComponent {
 
 		this.state = {
 			creatingReport: false,
+			profileExportStatus: 'idle',
+			profileExportPath: '',
 		};
 
 		shared.init(this);
 
 		this.checkSyncConfig_ = async () => {
 			await shared.checkSyncConfig(this, this.state.settings);
-		}
+		};
 
 		this.e2eeConfig_ = () => {
 			NavService.go('EncryptionConfig');
-		}
+		};
 
 		this.saveButton_press = async () => {
-			if (
-				this.state.changedSettingKeys.includes('sync.target')
-				&& this.state.settings['sync.target'] === SyncTargetRegistry.nameToId('filesystem')
-				&& !await this.checkFilesystemPermission()
-			) {
-				Alert.alert(
-					_('Warning'),
-					_(
-						'Joplin does not have permission to access "%s". ' +
-						'Either choose a different sync target, ' +
-						'or give Joplin the "Storage" permission.',
-						this.state.settings['sync.2.path'],
-					));
+			if (this.state.changedSettingKeys.includes('sync.target') && this.state.settings['sync.target'] === SyncTargetRegistry.nameToId('filesystem') && !(await this.checkFilesystemPermission())) {
+				Alert.alert(_('Warning'), _('In order to use file system synchronisation your permission to write to external storage is required.'));
 				// Save settings anyway, even if permission has not been granted
 			}
 			return shared.saveSettings(this);
@@ -65,45 +55,86 @@ class ConfigScreenComponent extends BaseScreenComponent {
 
 		this.syncStatusButtonPress_ = () => {
 			NavService.go('Status');
-		}
+		};
 
 		this.exportDebugButtonPress_ = async () => {
 			this.setState({ creatingReport: true });
 			const service = new ReportService();
 
 			const logItems = await reg.logger().lastEntries(null);
-			const logItemRows = [
-				['Date','Level','Message']
-			];
+			const logItemRows = [['Date', 'Level', 'Message']];
 			for (let i = 0; i < logItems.length; i++) {
 				const item = logItems[i];
-				logItemRows.push([
-					time.formatMsToLocal(item.timestamp, 'MM-DDTHH:mm:ss'),
-					item.level,
-					item.message
-				]);
+				logItemRows.push([time.formatMsToLocal(item.timestamp, 'MM-DDTHH:mm:ss'), item.level, item.message]);
 			}
 			const logItemCsv = service.csvCreate(logItemRows);
 
 			const itemListCsv = await service.basicItemList({ format: 'csv' });
-			const filePath = RNFS.ExternalDirectoryPath + '/syncReport-' + (new Date()).getTime() + '.txt';
+			const filePath = `${RNFS.ExternalDirectoryPath}/syncReport-${new Date().getTime()}.txt`;
 
-			const finalText = [logItemCsv, itemListCsv].join("\n================================================================================\n");
+			const finalText = [logItemCsv, itemListCsv].join('\n================================================================================\n');
 
 			await RNFS.writeFile(filePath, finalText);
-			alert('Debug report exported to ' + filePath);
+			alert(`Debug report exported to ${filePath}`);
 			this.setState({ creatingReport: false });
-		}
+		};
 
 		this.fixSearchEngineIndexButtonPress_ = async () => {
 			this.setState({ fixingSearchIndex: true });
 			await SearchEngine.instance().rebuildIndex();
 			this.setState({ fixingSearchIndex: false });
-		}
+		};
+
+		this.exportProfileButtonPress_ = async () => {
+			const p = this.state.profileExportPath ? this.state.profileExportPath : `${RNFS.ExternalStorageDirectoryPath}/JoplinProfileExport`;
+			this.setState({
+				profileExportStatus: 'prompt',
+				profileExportPath: p,
+			});
+		};
+
+		this.exportProfileButtonPress2_ = async () => {
+			this.setState({ profileExportStatus: 'exporting' });
+
+			const dbPath = '/data/data/net.cozic.joplin/databases';
+			const exportPath = this.state.profileExportPath;
+			const resourcePath = `${exportPath}/resources`;
+			try {
+				const hasPermissions = await checkPermissions(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+				if (!hasPermissions) {
+					throw new Error('Permission denied');
+				}
+
+				const copyFiles = async (source, dest) => {
+					await shim.fsDriver().mkdir(dest);
+
+					const files = await shim.fsDriver().readDirStats(source);
+
+					for (const file of files) {
+						const source_ = `${source}/${file.path}`;
+						const dest_ = `${dest}/${file.path}`;
+						if (!file.isDirectory()) {
+							reg.logger().info(`Copying profile: ${source_} => ${dest_}`);
+							await shim.fsDriver().copy(source_, dest_);
+						} else {
+							await copyFiles(source_, dest_);
+						}
+					}
+				};
+				await copyFiles(dbPath, exportPath);
+				await copyFiles(Setting.value('resourceDir'), resourcePath);
+
+				alert('Profile has been exported!');
+			} catch (error) {
+				alert(`Could not export files: ${error.message}`);
+			} finally {
+				this.setState({ profileExportStatus: 'idle' });
+			}
+		};
 
 		this.logButtonPress_ = () => {
 			NavService.go('Log');
-		}
+		};
 	}
 
 	async checkFilesystemPermission() {
@@ -111,23 +142,11 @@ class ConfigScreenComponent extends BaseScreenComponent {
 			// Not implemented yet
 			return true;
 		}
-		const hasPermission = await PermissionsAndroid.check(
-			PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
-		if (hasPermission) {
-			return true;
-		}
-		const requestResult = await PermissionsAndroid.request(
-			PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
-			{
-				title: _('Permission to write to external storage'),
-				message: _(
-					'In order to use file system synchronization your ' +
-					'permission to write to external storage is required.'
-				),
-				buttonPositive: _('OK'),
-			},
-		);
-		return (requestResult === PermissionsAndroid.RESULTS.GRANTED);
+		return await checkPermissions(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE, {
+			title: _('Information'),
+			message: _('In order to use file system synchronisation your permission to write to external storage is required.'),
+			buttonPositive: _('OK'),
+		});
 	}
 
 	UNSAFE_componentWillMount() {
@@ -141,7 +160,7 @@ class ConfigScreenComponent extends BaseScreenComponent {
 		if (this.styles_[themeId]) return this.styles_[themeId];
 		this.styles_ = {};
 
-		let styles = {
+		const styles = {
 			body: {
 				flex: 1,
 				justifyContent: 'flex-start',
@@ -165,8 +184,8 @@ class ConfigScreenComponent extends BaseScreenComponent {
 				paddingRight: 5,
 			},
 			descriptionText: {
-				color: theme.color,
-				fontSize: theme.fontSize,
+				color: theme.colorFaded,
+				fontSize: theme.fontSizeSmaller,
 				flex: 1,
 			},
 			sliderUnits: {
@@ -175,8 +194,8 @@ class ConfigScreenComponent extends BaseScreenComponent {
 				marginRight: 10,
 			},
 			settingDescriptionText: {
-				color: theme.color,
-				fontSize: theme.fontSize,
+				color: theme.colorFaded,
+				fontSize: theme.fontSizeSmaller,
 				flex: 1,
 				paddingLeft: theme.marginLeft,
 				paddingRight: theme.marginRight,
@@ -192,7 +211,10 @@ class ConfigScreenComponent extends BaseScreenComponent {
 				color: theme.color,
 				flex: 1,
 			},
-		}
+			textInput: {
+				color: theme.color,
+			},
+		};
 
 		styles.settingContainerNoBottomBorder = Object.assign({}, styles.settingContainer, {
 			borderBottomWidth: 0,
@@ -200,7 +222,7 @@ class ConfigScreenComponent extends BaseScreenComponent {
 		});
 
 		styles.settingControl.borderBottomWidth = 1;
-		styles.settingControl.borderBottomColor = theme.strongDividerColor;
+		styles.settingControl.borderBottomColor = theme.dividerColor;
 
 		styles.switchSettingText = Object.assign({}, styles.settingText);
 		styles.switchSettingText.width = '80%';
@@ -215,11 +237,11 @@ class ConfigScreenComponent extends BaseScreenComponent {
 		styles.linkText.flex = 0;
 		styles.linkText.fontWeight = 'normal';
 
-		styles.headerWrapperStyle = Object.assign({}, styles.settingContainer, theme.headerWrapperStyle)
+		styles.headerWrapperStyle = Object.assign({}, styles.settingContainer, theme.headerWrapperStyle);
 
 		styles.switchSettingControl = Object.assign({}, styles.settingControl);
 		delete styles.switchSettingControl.color;
-		//styles.switchSettingControl.width = '20%';
+		// styles.switchSettingControl.width = '20%';
 		styles.switchSettingControl.flex = 0;
 
 		this.styles_[themeId] = StyleSheet.create(styles);
@@ -241,7 +263,7 @@ class ConfigScreenComponent extends BaseScreenComponent {
 		let descriptionComp = null;
 		if (options.description) {
 			descriptionComp = (
-				<View style={{flex:1, marginTop: 10}}>
+				<View style={{ flex: 1, marginTop: 10 }}>
 					<Text style={this.styles().descriptionText}>{options.description}</Text>
 				</View>
 			);
@@ -249,19 +271,18 @@ class ConfigScreenComponent extends BaseScreenComponent {
 
 		return (
 			<View key={key} style={this.styles().settingContainer}>
-				<View style={{flex:1, flexDirection: 'column'}}>
-					<View style={{flex:1}}>
-						<Button title={title} onPress={clickHandler} disabled={!!options.disabled}/>
+				<View style={{ flex: 1, flexDirection: 'column' }}>
+					<View style={{ flex: 1 }}>
+						<Button title={title} onPress={clickHandler} disabled={!!options.disabled} />
 					</View>
-					{ options.statusComp }
-					{ descriptionComp }
+					{options.statusComp}
+					{descriptionComp}
 				</View>
 			</View>
 		);
 	}
 
 	sectionToComponent(key, section, settings) {
-		const theme = themeStyle(this.props.theme);
 		const settingComps = [];
 
 		for (let i = 0; i < section.metadatas.length; i++) {
@@ -273,10 +294,15 @@ class ConfigScreenComponent extends BaseScreenComponent {
 				if (syncTargetMd.supportsConfigCheck) {
 					const messages = shared.checkSyncConfigMessages(this);
 					const statusComp = !messages.length ? null : (
-						<View style={{flex:1, marginTop: 10}}>
+						<View style={{ flex: 1, marginTop: 10 }}>
 							<Text style={this.styles().descriptionText}>{messages[0]}</Text>
-							{messages.length >= 1 ? (<View style={{marginTop:10}}><Text style={this.styles().descriptionText}>{messages[1]}</Text></View>) : null}
-						</View>);
+							{messages.length >= 1 ? (
+								<View style={{ marginTop: 10 }}>
+									<Text style={this.styles().descriptionText}>{messages[1]}</Text>
+								</View>
+							) : null}
+						</View>
+					);
 
 					settingComps.push(this.renderButton('check_sync_config_button', _('Check synchronisation configuration'), this.checkSyncConfig_, { statusComp: statusComp }));
 				}
@@ -290,14 +316,12 @@ class ConfigScreenComponent extends BaseScreenComponent {
 			settingComps.push(this.renderButton('e2ee_config_button', _('Encryption Config'), this.e2eeConfig_));
 		}
 
-		const headerWrapperStyle = this.styles().headerWrapperStyle;
+		if (!settingComps.length) return null;
 
 		return (
 			<View key={key}>
 				{this.renderHeader(section.name, Setting.sectionNameToLabel(section.name))}
-				<View>
-					{settingComps}
-				</View>
+				<View>{settingComps}</View>
 			</View>
 		);
 	}
@@ -305,32 +329,34 @@ class ConfigScreenComponent extends BaseScreenComponent {
 	settingToComponent(key, value) {
 		const themeId = this.props.theme;
 		const theme = themeStyle(themeId);
-		let output = null;
+		const output = null;
 
 		const updateSettingValue = (key, value) => {
 			return shared.updateSettingValue(this, key, value);
-		}
+		};
 
 		const md = Setting.settingMetadata(key);
 		const settingDescription = md.description ? md.description() : '';
 
+		const descriptionComp = !settingDescription ? null : <Text style={this.styles().settingDescriptionText}>{settingDescription}</Text>;
+		const containerStyle = !settingDescription ? this.styles().settingContainer : this.styles().settingContainerNoBottomBorder;
+
 		if (md.isEnum) {
 			value = value.toString();
 
-			let items = [];
+			const items = [];
 			const settingOptions = md.options();
-			for (let k in settingOptions) {
+			for (const k in settingOptions) {
 				if (!settingOptions.hasOwnProperty(k)) continue;
 				items.push({ label: settingOptions[k], value: k.toString() });
 			}
 
-			const descriptionComp = !settingDescription ? null : <Text style={this.styles().settingDescriptionText}>{settingDescription}</Text>
-			const containerStyle = !settingDescription ? this.styles().settingContainer : this.styles().settingContainerNoBottomBorder;
-
 			return (
-				<View key={key} style={{flexDirection:'column', borderBottomWidth: 1, borderBottomColor: theme.dividerColor}}>
+				<View key={key} style={{ flexDirection: 'column', borderBottomWidth: 1, borderBottomColor: theme.dividerColor }}>
 					<View style={containerStyle}>
-						<Text key="label" style={this.styles().settingText}>{md.label()}</Text>
+						<Text key="label" style={this.styles().settingText}>
+							{md.label()}
+						</Text>
 						<Dropdown
 							key="control"
 							style={this.styles().settingControl}
@@ -347,7 +373,9 @@ class ConfigScreenComponent extends BaseScreenComponent {
 								color: theme.color,
 								fontSize: theme.fontSize,
 							}}
-							onValueChange={(itemValue, itemIndex) => { updateSettingValue(key, itemValue); }}
+							onValueChange={(itemValue) => {
+								updateSettingValue(key, itemValue);
+							}}
 						/>
 					</View>
 					{descriptionComp}
@@ -355,31 +383,44 @@ class ConfigScreenComponent extends BaseScreenComponent {
 			);
 		} else if (md.type == Setting.TYPE_BOOL) {
 			return (
-				<View key={key} style={this.styles().switchSettingContainer}>
-					<Text key="label" style={this.styles().switchSettingText}>{md.label()}</Text>
-					<Switch key="control" style={this.styles().switchSettingControl} value={value} onValueChange={(value) => updateSettingValue(key, value)} />
+				<View key={key}>
+					<View style={containerStyle}>
+						<Text key="label" style={this.styles().switchSettingText}>
+							{md.label()}
+						</Text>
+						<Switch key="control" style={this.styles().switchSettingControl} trackColor={{ false: theme.dividerColor }} value={value} onValueChange={value => updateSettingValue(key, value)} />
+					</View>
+					{descriptionComp}
 				</View>
 			);
 		} else if (md.type == Setting.TYPE_INT) {
 			const unitLabel = md.unitLabel ? md.unitLabel(value) : value;
+			// Note: Do NOT add the minimumTrackTintColor and maximumTrackTintColor props
+			// on the Slider as they are buggy and can crash the app on certain devices.
+			// https://github.com/laurent22/joplin/issues/2733
+			// https://github.com/react-native-community/react-native-slider/issues/161
 			return (
 				<View key={key} style={this.styles().settingContainer}>
-					<Text key="label" style={this.styles().settingText}>{md.label()}</Text>
-					<View style={{display:'flex', flexDirection: 'row', alignItems: 'center', flex:1}}>
+					<Text key="label" style={this.styles().settingText}>
+						{md.label()}
+					</Text>
+					<View style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', flex: 1 }}>
 						<Text style={this.styles().sliderUnits}>{unitLabel}</Text>
-						<Slider key="control" minimumTrackTintColor={theme.color} maximumTrackTintColor={theme.color} style={{flex:1}} step={md.step} minimumValue={md.minimum} maximumValue={md.maximum} value={value} onValueChange={(value) => updateSettingValue(key, value)} />
+						<Slider key="control" style={{ flex: 1 }} step={md.step} minimumValue={md.minimum} maximumValue={md.maximum} value={value} onValueChange={value => updateSettingValue(key, value)} />
 					</View>
 				</View>
 			);
 		} else if (md.type == Setting.TYPE_STRING) {
 			return (
 				<View key={key} style={this.styles().settingContainer}>
-					<Text key="label" style={this.styles().settingText}>{md.label()}</Text>
-					<TextInput autoCorrect={false} autoCompleteType="off" selectionColor={theme.textSelectionColor} autoCapitalize="none" key="control" style={this.styles().settingControl} value={value} onChangeText={(value) => updateSettingValue(key, value)} secureTextEntry={!!md.secure} />
+					<Text key="label" style={this.styles().settingText}>
+						{md.label()}
+					</Text>
+					<TextInput autoCorrect={false} autoCompleteType="off" selectionColor={theme.textSelectionColor} keyboardAppearance={theme.keyboardAppearance} autoCapitalize="none" key="control" style={this.styles().settingControl} value={value} onChangeText={value => updateSettingValue(key, value)} secureTextEntry={!!md.secure} />
 				</View>
 			);
 		} else {
-			//throw new Error('Unsupported setting type: ' + md.type);
+			// throw new Error('Unsupported setting type: ' + md.type);
 		}
 
 		return output;
@@ -388,14 +429,34 @@ class ConfigScreenComponent extends BaseScreenComponent {
 	render() {
 		const settings = this.state.settings;
 
+		const theme = themeStyle(this.props.theme);
+
 		const settingComps = shared.settingsToComponents2(this, 'mobile', settings);
 
 		settingComps.push(this.renderHeader('tools', _('Tools')));
 
 		settingComps.push(this.renderButton('status_button', _('Sync Status'), this.syncStatusButtonPress_));
 		settingComps.push(this.renderButton('log_button', _('Log'), this.logButtonPress_));
-		settingComps.push(this.renderButton('export_report_button', this.state.creatingReport ? _('Creating report...') : _('Export Debug Report'), this.exportDebugButtonPress_, { disabled: this.state.creatingReport }));
-		settingComps.push(this.renderButton('fix_search_engine_index', this.state.fixingSearchIndex ? _('Fixing search index...') : _('Fix search index'), this.fixSearchEngineIndexButtonPress_, { disabled: this.state.fixingSearchIndex, description: _('Use this to rebuild the search index if there is a problem with search. It may take some times depending on the number of notes.') }));
+		if (Platform.OS === 'android') {
+			settingComps.push(this.renderButton('export_report_button', this.state.creatingReport ? _('Creating report...') : _('Export Debug Report'), this.exportDebugButtonPress_, { disabled: this.state.creatingReport }));
+		}
+		settingComps.push(this.renderButton('fix_search_engine_index', this.state.fixingSearchIndex ? _('Fixing search index...') : _('Fix search index'), this.fixSearchEngineIndexButtonPress_, { disabled: this.state.fixingSearchIndex, description: _('Use this to rebuild the search index if there is a problem with search. It may take a long time depending on the number of notes.') }));
+
+		if (shim.mobilePlatform() === 'android') {
+			settingComps.push(this.renderButton('export_data', this.state.profileExportStatus === 'exporting' ? _('Exporting profile...') : _('Export profile'), this.exportProfileButtonPress_, { disabled: this.state.profileExportStatus === 'exporting', description: _('For debugging purpose only: export your profile to an external SD card.') }));
+
+			if (this.state.profileExportStatus === 'prompt') {
+				const profileExportPrompt = (
+					<View style={this.styles().settingContainer} key="profileExport">
+						<Text style={this.styles().settingText}>Path:</Text>
+						<TextInput style={{ ...this.styles().textInput, paddingRight: 20 }} onChange={(event) => this.setState({ profileExportPath: event.nativeEvent.text })} value={this.state.profileExportPath} placeholder="/path/to/sdcard" keyboardAppearance={theme.keyboardAppearance}></TextInput>
+						<Button title="OK" onPress={this.exportProfileButtonPress2_}></Button>
+					</View>
+				);
+
+				settingComps.push(profileExportPrompt);
+			}
+		}
 
 		settingComps.push(this.renderHeader('moreInfo', _('More information')));
 
@@ -406,10 +467,18 @@ class ConfigScreenComponent extends BaseScreenComponent {
 			settingComps.push(
 				<View key="permission_info" style={this.styles().settingContainer}>
 					<View key="permission_info_wrapper">
-						<Text key="perm1a" style={this.styles().settingText}>{_('To work correctly, the app needs the following permissions. Please enable them in your phone settings, in Apps > Joplin > Permissions')}</Text>
-						<Text key="perm2" style={this.styles().permissionText}>{_('- Storage: to allow attaching files to notes and to enable filesystem synchronisation.')}</Text>
-						<Text key="perm3" style={this.styles().permissionText}>{_('- Camera: to allow taking a picture and attaching it to a note.')}</Text>
-						<Text key="perm4" style={this.styles().permissionText}>{_('- Location: to allow attaching geo-location information to a note.')}</Text>
+						<Text key="perm1a" style={this.styles().settingText}>
+							{_('To work correctly, the app needs the following permissions. Please enable them in your phone settings, in Apps > Joplin > Permissions')}
+						</Text>
+						<Text key="perm2" style={this.styles().permissionText}>
+							{_('- Storage: to allow attaching files to notes and to enable filesystem synchronisation.')}
+						</Text>
+						<Text key="perm3" style={this.styles().permissionText}>
+							{_('- Camera: to allow taking a picture and attaching it to a note.')}
+						</Text>
+						<Text key="perm4" style={this.styles().permissionText}>
+							{_('- Location: to allow attaching geo-location information to a note.')}
+						</Text>
 					</View>
 				</View>
 			);
@@ -417,31 +486,49 @@ class ConfigScreenComponent extends BaseScreenComponent {
 
 		settingComps.push(
 			<View key="donate_link" style={this.styles().settingContainer}>
-				<TouchableOpacity onPress={() => { Linking.openURL('https://joplinapp.org/donate/') }}>
-					<Text key="label" style={this.styles().linkText}>{_('Make a donation')}</Text>
+				<TouchableOpacity
+					onPress={() => {
+						Linking.openURL('https://joplinapp.org/donate/');
+					}}
+				>
+					<Text key="label" style={this.styles().linkText}>
+						{_('Make a donation')}
+					</Text>
 				</TouchableOpacity>
 			</View>
 		);
 
 		settingComps.push(
 			<View key="website_link" style={this.styles().settingContainer}>
-				<TouchableOpacity onPress={() => { Linking.openURL('https://joplinapp.org/') }}>
-					<Text key="label" style={this.styles().linkText}>{_('Joplin website')}</Text>
+				<TouchableOpacity
+					onPress={() => {
+						Linking.openURL('https://joplinapp.org/');
+					}}
+				>
+					<Text key="label" style={this.styles().linkText}>
+						{_('Joplin website')}
+					</Text>
 				</TouchableOpacity>
 			</View>
 		);
 
 		settingComps.push(
 			<View key="privacy_link" style={this.styles().settingContainer}>
-				<TouchableOpacity onPress={() => { Linking.openURL('https://joplinapp.org/privacy/') }}>
-					<Text key="label" style={this.styles().linkText}>Privacy Policy</Text>
+				<TouchableOpacity
+					onPress={() => {
+						Linking.openURL('https://joplinapp.org/privacy/');
+					}}
+				>
+					<Text key="label" style={this.styles().linkText}>
+						Privacy Policy
+					</Text>
 				</TouchableOpacity>
 			</View>
 		);
 
 		settingComps.push(
 			<View key="version_info_app" style={this.styles().settingContainer}>
-					<Text style={this.styles().settingText}>{"Joplin " + VersionInfo.appVersion}</Text>
+				<Text style={this.styles().settingText}>{`Joplin ${VersionInfo.appVersion}`}</Text>
 			</View>
 		);
 
@@ -459,30 +546,18 @@ class ConfigScreenComponent extends BaseScreenComponent {
 
 		return (
 			<View style={this.rootStyle(this.props.theme).root}>
-				<ScreenHeader
-					title={_('Configuration')}
-					showSaveButton={true}
-					showSearchButton={false}
-					showSideMenuButton={false}
-					saveButtonDisabled={!this.state.changedSettingKeys.length}
-					onSaveButtonPress={this.saveButton_press}
-				/>
-				<ScrollView >
-					{ settingComps }
-				</ScrollView>
+				<ScreenHeader title={_('Configuration')} showSaveButton={true} showSearchButton={false} showSideMenuButton={false} saveButtonDisabled={!this.state.changedSettingKeys.length} onSaveButtonPress={this.saveButton_press} />
+				<ScrollView>{settingComps}</ScrollView>
 			</View>
 		);
 	}
-
 }
 
-const ConfigScreen = connect(
-	(state) => {
-		return {
-			settings: state.settings,
-			theme: state.settings.theme,
-		};
-	}
-)(ConfigScreenComponent)
+const ConfigScreen = connect(state => {
+	return {
+		settings: state.settings,
+		theme: state.settings.theme,
+	};
+})(ConfigScreenComponent);
 
 module.exports = { ConfigScreen };

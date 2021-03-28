@@ -1,3 +1,5 @@
+/* eslint-disable no-unused-vars */
+
 require('app-module-path').addPath(__dirname);
 
 const { asyncTest, fileContentEqual, setupDatabase, revisionService, setupDatabaseAndSynchronizer, db, synchronizer, fileApi, sleep, clearDatabase, switchClient, syncTargetId, objectsEqual, checkThrowAsync } = require('test-utils.js');
@@ -6,8 +8,6 @@ const KvStore = require('lib/services/KvStore.js');
 process.on('unhandledRejection', (reason, p) => {
 	console.log('Unhandled Rejection at: Promise', p, 'reason:', reason);
 });
-
-jasmine.DEFAULT_TIMEOUT_INTERVAL = 10000;
 
 function setupStore() {
 	const store = KvStore.instance();

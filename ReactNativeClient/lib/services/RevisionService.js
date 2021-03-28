@@ -1,4 +1,3 @@
-const { Logger } = require('lib/logger.js');
 const ItemChange = require('lib/models/ItemChange');
 const Note = require('lib/models/Note');
 const Folder = require('lib/models/Folder');
@@ -9,11 +8,9 @@ const ItemChangeUtils = require('lib/services/ItemChangeUtils');
 const { shim } = require('lib/shim');
 const BaseService = require('lib/services/BaseService');
 const { _ } = require('lib/locale.js');
-const ArrayUtils = require('lib/ArrayUtils.js');
 const { sprintf } = require('sprintf-js');
 
 class RevisionService extends BaseService {
-
 	constructor() {
 		super();
 
@@ -22,6 +19,10 @@ class RevisionService extends BaseService {
 		// the original note is saved. The goal is to have at least one revision in case the note
 		// is deleted or modified as a result of a bug or user mistake.
 		this.isOldNotesCache_ = {};
+
+		this.maintenanceCalls_ = [];
+		this.maintenanceTimer1_ = null;
+		this.maintenanceTimer2_ = null;
 	}
 
 	static instance() {
@@ -45,7 +46,7 @@ class RevisionService extends BaseService {
 	noteMetadata_(note) {
 		const excludedFields = ['type_', 'title', 'body', 'created_time', 'updated_time', 'encryption_applied', 'encryption_cipher_text', 'is_conflict'];
 		const md = {};
-		for (let k in note) {
+		for (const k in note) {
 			if (excludedFields.indexOf(k) >= 0) continue;
 			md[k] = note[k];
 		}
@@ -57,8 +58,8 @@ class RevisionService extends BaseService {
 	}
 
 	isEmptyRevision_(rev) {
-		if (!!rev.title_diff) return false;
-		if (!!rev.body_diff) return false;
+		if (rev.title_diff) return false;
+		if (rev.body_diff) return false;
 
 		const md = JSON.parse(rev.metadata_diff);
 		if (md.new && Object.keys(md.new).length) return false;
@@ -113,7 +114,8 @@ class RevisionService extends BaseService {
 			while (true) {
 				// See synchronizer test units to see why changes coming
 				// from sync are skipped.
-				const changes = await ItemChange.modelSelectAll(`
+				const changes = await ItemChange.modelSelectAll(
+					`
 					SELECT id, item_id, type, before_change_item
 					FROM item_changes
 					WHERE item_type = ?
@@ -122,12 +124,14 @@ class RevisionService extends BaseService {
 					AND id > ?
 					ORDER BY id ASC
 					LIMIT 10
-				`, [BaseModel.TYPE_NOTE, ItemChange.SOURCE_SYNC, ItemChange.SOURCE_DECRYPTION, Setting.value('revisionService.lastProcessedChangeId')]);
+				`,
+					[BaseModel.TYPE_NOTE, ItemChange.SOURCE_SYNC, ItemChange.SOURCE_DECRYPTION, Setting.value('revisionService.lastProcessedChangeId')]
+				);
 
 				if (!changes.length) break;
 
 				const noteIds = changes.map(a => a.item_id);
-				const notes = await Note.modelSelectAll('SELECT * FROM notes WHERE is_conflict = 0 AND encryption_applied = 0 AND id IN ("' + noteIds.join('","') + '")');
+				const notes = await Note.modelSelectAll(`SELECT * FROM notes WHERE is_conflict = 0 AND encryption_applied = 0 AND id IN ("${noteIds.join('","')}")`);
 
 				for (let i = 0; i < changes.length; i++) {
 					const change = changes[i];
@@ -176,11 +180,11 @@ class RevisionService extends BaseService {
 		}
 
 		await Setting.saveAll();
-		await ItemChangeUtils.deleteProcessedChanges();	
+		await ItemChangeUtils.deleteProcessedChanges();
 
 		this.isCollecting_ = false;
 
-		this.logger().info('RevisionService::collectRevisions: Created revisions for ' + doneNoteIds.length + ' notes');
+		this.logger().info(`RevisionService::collectRevisions: Created revisions for ${doneNoteIds.length} notes`);
 	}
 
 	async deleteOldRevisions(ttl) {
@@ -188,15 +192,18 @@ class RevisionService extends BaseService {
 	}
 
 	async revisionNote(revisions, index) {
-		if (index < 0 || index >= revisions.length) throw new Error('Invalid revision index: ' + index);
+		if (index < 0 || index >= revisions.length) throw new Error(`Invalid revision index: ${index}`);
 
 		const rev = revisions[index];
 		const merged = await Revision.mergeDiffs(rev, revisions);
 
-		const output = Object.assign({
-			title: merged.title,
-			body: merged.body,
-		}, merged.metadata);
+		const output = Object.assign(
+			{
+				title: merged.title,
+				body: merged.body,
+			},
+			merged.metadata
+		);
 		output.updated_time = output.user_updated_time;
 		output.created_time = output.user_created_time;
 		output.type_ = BaseModel.TYPE_NOTE;
@@ -232,22 +239,27 @@ class RevisionService extends BaseService {
 	}
 
 	async maintenance() {
-		const startTime = Date.now();
-		this.logger().info('RevisionService::maintenance: Starting...');
+		this.maintenanceCalls_.push(true);
+		try {
+			const startTime = Date.now();
+			this.logger().info('RevisionService::maintenance: Starting...');
 
-		if (!Setting.value('revisionService.enabled')) {
-			this.logger().info('RevisionService::maintenance: Service is disabled');
-			// We do as if we had processed all the latest changes so that they can be cleaned up 
-			// later on by ItemChangeUtils.deleteProcessedChanges().
-			Setting.setValue('revisionService.lastProcessedChangeId', await ItemChange.lastChangeId());
-			await this.deleteOldRevisions(Setting.value('revisionService.ttlDays') * 24 * 60 * 60 * 1000);
-		} else {
-			this.logger().info('RevisionService::maintenance: Service is enabled');
-			await this.collectRevisions();
-			await this.deleteOldRevisions(Setting.value('revisionService.ttlDays') * 24 * 60 * 60 * 1000);
+			if (!Setting.value('revisionService.enabled')) {
+				this.logger().info('RevisionService::maintenance: Service is disabled');
+				// We do as if we had processed all the latest changes so that they can be cleaned up
+				// later on by ItemChangeUtils.deleteProcessedChanges().
+				Setting.setValue('revisionService.lastProcessedChangeId', await ItemChange.lastChangeId());
+				await this.deleteOldRevisions(Setting.value('revisionService.ttlDays') * 24 * 60 * 60 * 1000);
+			} else {
+				this.logger().info('RevisionService::maintenance: Service is enabled');
+				await this.collectRevisions();
+				await this.deleteOldRevisions(Setting.value('revisionService.ttlDays') * 24 * 60 * 60 * 1000);
+
+				this.logger().info(`RevisionService::maintenance: Done in ${Date.now() - startTime}ms`);
+			}
+		} finally {
+			this.maintenanceCalls_.pop();
 		}
-
-		this.logger().info('RevisionService::maintenance: Done in ' + (Date.now() - startTime) + 'ms');
 	}
 
 	runInBackground(collectRevisionInterval = null) {
@@ -256,17 +268,36 @@ class RevisionService extends BaseService {
 
 		if (collectRevisionInterval === null) collectRevisionInterval = 1000 * 60 * 10;
 
-		this.logger().info('RevisionService::runInBackground: Starting background service with revision collection interval ' + collectRevisionInterval);
+		this.logger().info(`RevisionService::runInBackground: Starting background service with revision collection interval ${collectRevisionInterval}`);
 
-		setTimeout(() => {
+		this.maintenanceTimer1_ = setTimeout(() => {
 			this.maintenance();
 		}, 1000 * 4);
-		
-		shim.setInterval(() => {
+
+		this.maintenanceTImer2_ = shim.setInterval(() => {
 			this.maintenance();
 		}, collectRevisionInterval);
 	}
 
+	async cancelTimers() {
+		if (this.maintenanceTimer1_) {
+			clearTimeout(this.maintenanceTimer1);
+			this.maintenanceTimer1_ = null;
+		}
+		if (this.maintenanceTimer2_) {
+			shim.clearInterval(this.maintenanceTimer2);
+			this.maintenanceTimer2_ = null;
+		}
+
+		return new Promise((resolve) => {
+			const iid = setInterval(() => {
+				if (!this.maintenanceCalls_.length) {
+					clearInterval(iid);
+					resolve();
+				}
+			}, 100);
+		});
+	}
 }
 
 module.exports = RevisionService;

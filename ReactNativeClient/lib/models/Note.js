@@ -6,15 +6,16 @@ const Resource = require('lib/models/Resource.js');
 const Setting = require('lib/models/Setting.js');
 const { shim } = require('lib/shim.js');
 const { pregQuote } = require('lib/string-utils.js');
-const { toSystemSlashes, toFileProtocolPath } = require('lib/path-utils.js');
 const { time } = require('lib/time-utils.js');
 const { _ } = require('lib/locale.js');
 const ArrayUtils = require('lib/ArrayUtils.js');
-const moment = require('moment');
 const lodash = require('lodash');
+const urlUtils = require('lib/urlUtils.js');
+const markdownUtils = require('lib/markdownUtils.js');
+const { MarkupToHtml } = require('lib/joplin-renderer');
+const { ALL_NOTES_FILTER_ID } = require('lib/reserved-ids');
 
 class Note extends BaseItem {
-
 	static tableName() {
 		return 'notes';
 	}
@@ -24,6 +25,7 @@ class Note extends BaseItem {
 			title: _('title'),
 			user_updated_time: _('updated date'),
 			user_created_time: _('created date'),
+			order: _('custom order'),
 		};
 
 		return field in fieldsToLabels ? fieldsToLabels[field] : field;
@@ -34,8 +36,8 @@ class Note extends BaseItem {
 	}
 
 	static async unserializeForEdit(content) {
-		content += "\n\ntype_: " + BaseModel.TYPE_NOTE;
-		let output = await super.unserialize(content);
+		content += `\n\ntype_: ${BaseModel.TYPE_NOTE}`;
+		const output = await super.unserialize(content);
 		if (!output.title) output.title = '';
 		if (!output.body) output.body = '';
 		output.body = await this.replaceResourceExternalToInternalLinks(output.body);
@@ -43,16 +45,16 @@ class Note extends BaseItem {
 	}
 
 	static async serializeAllProps(note) {
-		let fieldNames = this.fieldNames();
+		const fieldNames = this.fieldNames();
 		fieldNames.push('type_');
 		lodash.pull(fieldNames, 'title', 'body');
 		return super.serialize(note, fieldNames);
 	}
 
 	static minimalSerializeForDisplay(note) {
-		let n = Object.assign({}, note);
+		const n = Object.assign({}, note);
 
-		let fieldNames = this.fieldNames();
+		const fieldNames = this.fieldNames();
 
 		if (!n.is_conflict) lodash.pull(fieldNames, 'is_conflict');
 		if (!Number(n.latitude)) lodash.pull(fieldNames, 'latitude');
@@ -77,27 +79,12 @@ class Note extends BaseItem {
 		return super.serialize(n, fieldNames);
 	}
 
-	static defaultTitle(note) {
-		return this.defaultTitleFromBody(note.body);
+	static defaultTitle(noteBody) {
+		return this.defaultTitleFromBody(noteBody);
 	}
 
 	static defaultTitleFromBody(body) {
-		if (body && body.length) {
-			const lines = body.trim().split("\n");
-			let output = lines[0].trim();
-			// Remove the first #, *, etc.
-			while (output.length) {
-				const c = output[0];
-				if (['#', ' ', "\n", "\t", '*', '`', '-'].indexOf(c) >= 0) {
-					output = output.substr(1);
-				} else {
-					break;
-				}
-			}
-			return output.substr(0, 80).trim();
-		}
-
-		return _('Untitled');
+		return markdownUtils.titleFromBody(body);
 	}
 
 	static geolocationUrl(note) {
@@ -107,7 +94,7 @@ class Note extends BaseItem {
 	}
 
 	static geoLocationUrlFromLatLong(lat, long) {
-		return sprintf('https://www.openstreetmap.org/?lat=%s&lon=%s&zoom=20', lat, long)
+		return sprintf('https://www.openstreetmap.org/?mlat=%s&mlon=%s&zoom=20', lat, long);
 	}
 
 	static modelType() {
@@ -117,40 +104,15 @@ class Note extends BaseItem {
 	static linkedItemIds(body) {
 		if (!body || body.length <= 32) return [];
 
-		// For example: ![](:/fcca2938a96a22570e8eae2565bc6b0b)
-		let matches = body.match(/\(:\/[a-zA-Z0-9]{32}\)/g);
-		if (!matches) matches = [];
-		matches = matches.map((m) => m.substr(3, 32));
-
-		// For example: ![](:/fcca2938a96a22570e8eae2565bc6b0b "Some title")
-		let matches2 = body.match(/\(:\/[a-zA-Z0-9]{32}\s(.*?)\)/g);
-		if (!matches2) matches2 = [];
-		matches2 = matches2.map((m) => m.substr(3, 32));
-		matches = matches.concat(matches2)
-
-		// For example: <img src=":/fcca2938a96a22570e8eae2565bc6b0b"/>
-		const imgRegex = /<img.*?src=["']:\/([a-zA-Z0-9]{32})["']/g
-		const imgMatches = [];
-		while (true) {
-			const m = imgRegex.exec(body);
-			if (!m) break;
-			imgMatches.push(m[1]);
-		}
-
-		return ArrayUtils.unique(matches.concat(imgMatches));
+		const links = urlUtils.extractResourceUrls(body);
+		const itemIds = links.map(l => l.itemId);
+		return ArrayUtils.unique(itemIds);
 	}
 
 	static async linkedItems(body) {
 		const itemIds = this.linkedItemIds(body);
-		const output = [];
-
-		for (let i = 0; i < itemIds.length; i++) {
-			const item = await BaseItem.loadItemById(itemIds[i]);
-			if (!item) continue;
-			output.push(item);
-		}
-
-		return output;
+		const r = await BaseItem.loadItemsByIds(itemIds);
+		return r;
 	}
 
 	static async linkedItemIdsByType(type, body) {
@@ -166,10 +128,20 @@ class Note extends BaseItem {
 	}
 
 	static async linkedResourceIds(body) {
-		return await this.linkedItemIdsByType(BaseModel.TYPE_RESOURCE, body);
+		return this.linkedItemIdsByType(BaseModel.TYPE_RESOURCE, body);
 	}
 
-	static async replaceResourceInternalToExternalLinks(body) {
+	static async linkedNoteIds(body) {
+		return this.linkedItemIdsByType(BaseModel.TYPE_NOTE, body);
+	}
+
+	static async replaceResourceInternalToExternalLinks(body, options = null) {
+		options = Object.assign({}, {
+			useAbsolutePaths: false,
+		}, options);
+
+		this.logger().debug('replaceResourceInternalToExternalLinks', 'options:', options, 'body:', body);
+
 		const resourceIds = await this.linkedResourceIds(body);
 		const Resource = this.getClass('Resource');
 
@@ -177,59 +149,93 @@ class Note extends BaseItem {
 			const id = resourceIds[i];
 			const resource = await Resource.load(id);
 			if (!resource) continue;
-			const resourcePath = Resource.relativePath(resource)
-			body = body.replace(new RegExp(':/' + id, 'gi'), resourcePath);
+			const resourcePath = options.useAbsolutePaths ? `${`file://${Resource.fullPath(resource)}` + '?t='}${resource.updated_time}` : Resource.relativePath(resource);
+			body = body.replace(new RegExp(`:/${id}`, 'gi'), markdownUtils.escapeLinkUrl(resourcePath));
 		}
+
+		this.logger().debug('replaceResourceInternalToExternalLinks result', body);
 
 		return body;
 	}
 
-	static async replaceResourceExternalToInternalLinks(body) {
-		const reString = pregQuote(Resource.baseRelativeDirectoryPath() + '/') + '[a-zA-Z0-9\.]+';
-		const re = new RegExp(reString, 'gi');
-		body = body.replace(re, (match) => {
-			const id = Resource.pathToId(match);
-			return ':/' + id;
-		});
+	static async replaceResourceExternalToInternalLinks(body, options = null) {
+		options = Object.assign({}, {
+			useAbsolutePaths: false,
+		}, options);
+
+		const pathsToTry = [];
+		if (options.useAbsolutePaths) {
+			pathsToTry.push(`file://${Setting.value('resourceDir')}`);
+			pathsToTry.push(`file://${shim.pathRelativeToCwd(Setting.value('resourceDir'))}`);
+		} else {
+			pathsToTry.push(Resource.baseRelativeDirectoryPath());
+		}
+
+		this.logger().debug('replaceResourceExternalToInternalLinks', 'options:', options, 'pathsToTry:', pathsToTry, 'body:', body);
+
+		for (const basePath of pathsToTry) {
+			const reStrings = [
+				// Handles file://path/to/abcdefg.jpg?t=12345678
+				`${pregQuote(`${basePath}/`)}[a-zA-Z0-9.]+\\?t=[0-9]+`,
+				// Handles file://path/to/abcdefg.jpg
+				`${pregQuote(`${basePath}/`)}[a-zA-Z0-9.]+`,
+			];
+			for (const reString of reStrings) {
+				const re = new RegExp(reString, 'gi');
+				body = body.replace(re, match => {
+					const id = Resource.pathToId(match);
+					return `:/${id}`;
+				});
+			}
+
+			// Handles joplin://af0edffa4a60496bba1b0ba06b8fb39a
+			body = body.replace(/\(joplin:\/\/([a-zA-Z0-9]{32})\)/g, '(:/$1)');
+		}
+
+		this.logger().debug('replaceResourceExternalToInternalLinks result', body);
+
 		return body;
 	}
 
 	static new(parentId = '') {
-		let output = super.new();
+		const output = super.new();
 		output.parent_id = parentId;
 		return output;
 	}
 
 	static newTodo(parentId = '') {
-		let output = this.new(parentId);
+		const output = this.new(parentId);
 		output.is_todo = true;
 		return output;
 	}
 
 	// Note: sort logic must be duplicated in previews();
 	static sortNotes(notes, orders, uncompletedTodosOnTop) {
-		const noteOnTop = (note) => {
+		const noteOnTop = note => {
 			return uncompletedTodosOnTop && note.is_todo && !note.todo_completed;
-		}
+		};
 
 		const noteFieldComp = (f1, f2) => {
 			if (f1 === f2) return 0;
 			return f1 < f2 ? -1 : +1;
-		}
+		};
 
 		// Makes the sort deterministic, so that if, for example, a and b have the
 		// same updated_time, they aren't swapped every time a list is refreshed.
 		const sortIdenticalNotes = (a, b) => {
 			let r = null;
-			r = noteFieldComp(a.user_updated_time, b.user_updated_time); if (r) return r;
-			r = noteFieldComp(a.user_created_time, b.user_created_time); if (r) return r;
+			r = noteFieldComp(a.user_updated_time, b.user_updated_time);
+			if (r) return r;
+			r = noteFieldComp(a.user_created_time, b.user_created_time);
+			if (r) return r;
 
 			const titleA = a.title ? a.title.toLowerCase() : '';
 			const titleB = b.title ? b.title.toLowerCase() : '';
-			r = noteFieldComp(titleA, titleB); if (r) return r;
+			r = noteFieldComp(titleA, titleB);
+			if (r) return r;
 
 			return noteFieldComp(a.id, b.id);
-		}
+		};
 
 		return notes.sort((a, b) => {
 			if (noteOnTop(a) && !noteOnTop(b)) return -1;
@@ -239,8 +245,12 @@ class Note extends BaseItem {
 
 			for (let i = 0; i < orders.length; i++) {
 				const order = orders[i];
-				if (a[order.by] < b[order.by]) r = +1;
-				if (a[order.by] > b[order.by]) r = -1;
+				let aProp = a[order.by];
+				let bProp = b[order.by];
+				if (typeof aProp === 'string') aProp = aProp.toLowerCase();
+				if (typeof bProp === 'string') bProp = bProp.toLowerCase();
+				if (aProp < bProp) r = +1;
+				if (aProp > bProp) r = -1;
 				if (order.dir == 'ASC') r = -r;
 				if (r !== 0) return r;
 			}
@@ -249,9 +259,24 @@ class Note extends BaseItem {
 		});
 	}
 
-	static previewFields() {
-		// return ['id', 'title', 'body', 'is_todo', 'todo_completed', 'parent_id', 'updated_time', 'user_updated_time', 'user_created_time', 'encryption_applied'];
-		return ['id', 'title', 'is_todo', 'todo_completed', 'parent_id', 'updated_time', 'user_updated_time', 'user_created_time', 'encryption_applied'];
+	static previewFieldsWithDefaultValues(options = null) {
+		return Note.defaultValues(this.previewFields(options));
+	}
+
+	static previewFields(options = null) {
+		options = Object.assign({
+			includeTimestamps: true,
+		}, options);
+
+		const output = ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'encryption_applied', 'order', 'markup_language'];
+
+		if (options.includeTimestamps) {
+			output.push('updated_time');
+			output.push('user_updated_time');
+			output.push('user_created_time');
+		}
+
+		return output;
 	}
 
 	static previewFieldsSql(fields = null) {
@@ -262,13 +287,13 @@ class Note extends BaseItem {
 	static async loadFolderNoteByField(folderId, field, value) {
 		if (!folderId) throw new Error('folderId is undefined');
 
-		let options = {
-			conditions: ['`' + field + '` = ?'],
+		const options = {
+			conditions: [`\`${field}\` = ?`],
 			conditionsParams: [value],
 			fields: '*',
-		}
+		};
 
-		let results = await this.previews(folderId, options);
+		const results = await this.previews(folderId, options);
 		return results.length ? results[0] : null;
 	}
 
@@ -277,12 +302,7 @@ class Note extends BaseItem {
 		// is used to sort already loaded notes.
 
 		if (!options) options = {};
-		if (!('order' in options)) options.order = [
-			{ by: 'user_updated_time', dir: 'DESC' },
-			{ by: 'user_created_time', dir: 'DESC' },
-			{ by: 'title', dir: 'DESC' },
-			{ by: 'id', dir: 'DESC' },
-		];
+		if (!('order' in options)) options.order = [{ by: 'user_updated_time', dir: 'DESC' }, { by: 'user_created_time', dir: 'DESC' }, { by: 'title', dir: 'DESC' }, { by: 'id', dir: 'DESC' }];
 		if (!options.conditions) options.conditions = [];
 		if (!options.conditionsParams) options.conditionsParams = [];
 		if (!options.fields) options.fields = this.previewFields();
@@ -293,14 +313,14 @@ class Note extends BaseItem {
 			options.conditions.push('is_conflict = 1');
 		} else {
 			options.conditions.push('is_conflict = 0');
-			if (parentId) {
+			if (parentId && parentId !== ALL_NOTES_FILTER_ID) {
 				options.conditions.push('parent_id = ?');
 				options.conditionsParams.push(parentId);
 			}
 		}
 
 		if (options.anywherePattern) {
-			let pattern = options.anywherePattern.replace(/\*/g, '%');
+			const pattern = options.anywherePattern.replace(/\*/g, '%');
 			options.conditions.push('(title LIKE ? OR body LIKE ?)');
 			options.conditionsParams.push(pattern);
 			options.conditionsParams.push(pattern);
@@ -327,7 +347,7 @@ class Note extends BaseItem {
 			let tempOptions = Object.assign({}, options);
 			tempOptions.conditions = cond;
 
-			let uncompletedTodos = await this.search(tempOptions);
+			const uncompletedTodos = await this.search(tempOptions);
 
 			cond = options.conditions.slice();
 			if (hasNotes && hasTodos) {
@@ -339,13 +359,13 @@ class Note extends BaseItem {
 			tempOptions = Object.assign({}, options);
 			tempOptions.conditions = cond;
 			if ('limit' in tempOptions) tempOptions.limit -= uncompletedTodos.length;
-			let theRest = await this.search(tempOptions);
+			const theRest = await this.search(tempOptions);
 
 			return uncompletedTodos.concat(theRest);
 		}
 
 		if (hasNotes && hasTodos) {
-
+			// Nothing
 		} else if (hasNotes) {
 			options.conditions.push('is_todo = 0');
 		} else if (hasTodos) {
@@ -357,7 +377,7 @@ class Note extends BaseItem {
 
 	static preview(noteId, options = null) {
 		if (!options) options = { fields: null };
-		return this.modelSelectOne('SELECT ' + this.previewFieldsSql(options.fields) + ' FROM notes WHERE is_conflict = 0 AND id = ?', [noteId]);
+		return this.modelSelectOne(`SELECT ${this.previewFieldsSql(options.fields)} FROM notes WHERE is_conflict = 0 AND id = ?`, [noteId]);
 	}
 
 	static async search(options = null) {
@@ -379,7 +399,7 @@ class Note extends BaseItem {
 	}
 
 	static async conflictedCount() {
-		let r = await this.db().selectOne('SELECT count(*) as total FROM notes WHERE is_conflict = 1');
+		const r = await this.db().selectOne('SELECT count(*) as total FROM notes WHERE is_conflict = 1');
 		return r && r.total ? r.total : 0;
 	}
 
@@ -391,13 +411,13 @@ class Note extends BaseItem {
 		if (!Setting.value('trackLocation')) return;
 		if (!Note.updateGeolocationEnabled_) return;
 
-		let startWait = time.unixMs();
+		const startWait = time.unixMs();
 		while (true) {
 			if (!this.geolocationUpdating_) break;
 			this.logger().info('Waiting for geolocation update...');
 			await time.sleep(1);
 			if (startWait + 1000 * 20 < time.unixMs()) {
-				this.logger().warn('Failed to update geolocation for: timeout: ' + noteId);
+				this.logger().warn(`Failed to update geolocation for: timeout: ${noteId}`);
 				return;
 			}
 		}
@@ -412,7 +432,7 @@ class Note extends BaseItem {
 			try {
 				geoData = await shim.Geolocation.currentPosition();
 			} catch (error) {
-				this.logger().error('Could not get lat/long for note ' + noteId + ': ', error);
+				this.logger().error(`Could not get lat/long for note ${noteId}: `, error);
 				geoData = null;
 			}
 
@@ -424,9 +444,9 @@ class Note extends BaseItem {
 			this.geolocationCache_ = geoData;
 		}
 
-		this.logger().info('Updating lat/long of note ' + noteId);
+		this.logger().info(`Updating lat/long of note ${noteId}`);
 
-		let note = await Note.load(noteId);
+		const note = await Note.load(noteId);
 		if (!note) return; // Race condition - note has been deleted in the meantime
 
 		note.longitude = geoData.coords.longitude;
@@ -438,7 +458,7 @@ class Note extends BaseItem {
 	static filter(note) {
 		if (!note) return note;
 
-		let output = super.filter(note);
+		const output = super.filter(note);
 		if ('longitude' in output) output.longitude = Number(!output.longitude ? 0 : output.longitude).toFixed(8);
 		if ('latitude' in output) output.latitude = Number(!output.latitude ? 0 : output.latitude).toFixed(8);
 		if ('altitude' in output) output.altitude = Number(!output.altitude ? 0 : output.altitude).toFixed(4);
@@ -446,7 +466,7 @@ class Note extends BaseItem {
 	}
 
 	static async copyToFolder(noteId, folderId) {
-		if (folderId == this.getClass('Folder').conflictFolderId()) throw new Error(_('Cannot copy note to "%s" notebook', this.getClass('Folder').conflictFolderIdTitle()));
+		if (folderId == this.getClass('Folder').conflictFolderId()) throw new Error(_('Cannot copy note to "%s" notebook', this.getClass('Folder').conflictFolderTitle()));
 
 		return Note.duplicate(noteId, {
 			changes: {
@@ -457,7 +477,7 @@ class Note extends BaseItem {
 	}
 
 	static async moveToFolder(noteId, folderId) {
-		if (folderId == this.getClass('Folder').conflictFolderId()) throw new Error(_('Cannot move note to "%s" notebook', this.getClass('Folder').conflictFolderIdTitle()));
+		if (folderId == this.getClass('Folder').conflictFolderId()) throw new Error(_('Cannot move note to "%s" notebook', this.getClass('Folder').conflictFolderTitle()));
 
 		// When moving a note to a different folder, the user timestamp is not updated.
 		// However updated_time is updated so that the note can be synced later on.
@@ -488,7 +508,7 @@ class Note extends BaseItem {
 	}
 
 	static toggleIsTodo(note) {
-		return this.changeNoteType(note, !!note.is_todo ? 'note' : 'todo');
+		return this.changeNoteType(note, note.is_todo ? 'note' : 'todo');
 	}
 
 	static toggleTodoCompleted(note) {
@@ -500,8 +520,25 @@ class Note extends BaseItem {
 		} else {
 			note.todo_completed = Date.now();
 		}
-		
+
 		return note;
+	}
+
+	static async duplicateMultipleNotes(noteIds, options = null) {
+		// if options.uniqueTitle is true, a unique title for the duplicated file will be assigned.
+		const ensureUniqueTitle = options && options.ensureUniqueTitle;
+
+		for (const noteId of noteIds) {
+			const noteOptions = {};
+
+			// If ensureUniqueTitle is truthy, set the original note's name as root for the unique title.
+			if (ensureUniqueTitle) {
+				const originalNote = await Note.load(noteId);
+				noteOptions.uniqueTitle = originalNote.title;
+			}
+
+			await Note.duplicate(noteId, noteOptions);
+		}
 	}
 
 	static async duplicate(noteId, options = null) {
@@ -509,12 +546,16 @@ class Note extends BaseItem {
 		const uniqueTitle = options && options.uniqueTitle;
 
 		const originalNote = await Note.load(noteId);
-		if (!originalNote) throw new Error('Unknown note: ' + noteId);
+		if (!originalNote) throw new Error(`Unknown note: ${noteId}`);
 
-		let newNote = Object.assign({}, originalNote);
-		delete newNote.id;
+		const newNote = Object.assign({}, originalNote);
+		const fieldsToReset = ['id', 'created_time', 'updated_time', 'user_created_time', 'user_updated_time'];
 
-		for (let n in changes) {
+		for (const field of fieldsToReset) {
+			delete newNote[field];
+		}
+
+		for (const n in changes) {
 			if (!changes.hasOwnProperty(n)) continue;
 			newNote[n] = changes[n];
 		}
@@ -529,14 +570,17 @@ class Note extends BaseItem {
 
 	static async noteIsOlderThan(noteId, date) {
 		const n = await this.db().selectOne('SELECT updated_time FROM notes WHERE id = ?', [noteId]);
-		if (!n) throw new Error('No such note: ' + noteId);
+		if (!n) throw new Error(`No such note: ${noteId}`);
 		return n.updated_time < date;
 	}
 
 	static async save(o, options = null) {
-		let isNew = this.isNew(o, options);
+		const isNew = this.isNew(o, options);
+		const isProvisional = options && !!options.provisional;
+		const dispatchUpdateAction = options ? options.dispatchUpdateAction !== false : true;
 		if (isNew && !o.source) o.source = Setting.value('appName');
 		if (isNew && !o.source_application) o.source_application = Setting.value('appId');
+		if (isNew && !('order' in o)) o.order = Date.now();
 
 		// We only keep the previous note content for "old notes" (see Revision Service for more info)
 		// In theory, we could simply save all the previous note contents, and let the revision service
@@ -554,10 +598,13 @@ class Note extends BaseItem {
 		const changeSource = options && options.changeSource ? options.changeSource : null;
 		ItemChange.add(BaseModel.TYPE_NOTE, note.id, isNew ? ItemChange.TYPE_CREATE : ItemChange.TYPE_UPDATE, changeSource, beforeNoteJson);
 
-		this.dispatch({
-			type: 'NOTE_UPDATE_ONE',
-			note: note,
-		});
+		if (dispatchUpdateAction) {
+			this.dispatch({
+				type: 'NOTE_UPDATE_ONE',
+				note: note,
+				provisional: isProvisional,
+			});
+		}
 
 		if ('todo_due' in o || 'todo_completed' in o || 'is_todo' in o || 'is_conflict' in o) {
 			this.dispatch({
@@ -581,7 +628,7 @@ class Note extends BaseItem {
 				beforeChangeItems[note.id] = JSON.stringify(note);
 			}
 
-			const result = await super.batchDelete(processIds, options);
+			await super.batchDelete(processIds, options);
 			const changeSource = options && options.changeSource ? options.changeSource : null;
 			for (let i = 0; i < processIds.length; i++) {
 				const id = processIds[i];
@@ -627,6 +674,143 @@ class Note extends BaseItem {
 		if (localNote.body !== remoteNote.body) return true;
 
 		return false;
+	}
+
+	static markupLanguageToLabel(markupLanguageId) {
+		if (markupLanguageId === MarkupToHtml.MARKUP_LANGUAGE_MARKDOWN) return 'Markdown';
+		if (markupLanguageId === MarkupToHtml.MARKUP_LANGUAGE_HTML) return 'HTML';
+		throw new Error(`Invalid markup language ID: ${markupLanguageId}`);
+	}
+
+	// When notes are sorted in "custom order", they are sorted by the "order" field first and,
+	// in those cases, where the order field is the same for some notes, by created time.
+	static customOrderByColumns(type = null) {
+		if (!type) type = 'object';
+		if (type === 'object') return [{ by: 'order', dir: 'DESC' }, { by: 'user_created_time', dir: 'DESC' }];
+		if (type === 'string') return 'ORDER BY `order` DESC, user_created_time DESC';
+		throw new Error(`Invalid type: ${type}`);
+	}
+
+	// Update the note "order" field without changing the user timestamps,
+	// which is generally what we want.
+	static async updateNoteOrder_(note, order) {
+		return Note.save(Object.assign({}, note, {
+			order: order,
+			user_updated_time: note.user_updated_time,
+		}), { autoTimestamp: false, dispatchUpdateAction: false });
+	}
+
+	// This method will disable the NOTE_UPDATE_ONE action to prevent a lot
+	// of unecessary updates, so it's the caller's responsability to update
+	// the UI once the call is finished. This is done by listening to the
+	// NOTE_IS_INSERTING_NOTES action in the application middleware.
+	static async insertNotesAt(folderId, noteIds, index) {
+		if (!noteIds.length) return;
+
+		const defer = () => {
+			this.dispatch({
+				type: 'NOTE_IS_INSERTING_NOTES',
+				value: false,
+			});
+		};
+
+		this.dispatch({
+			type: 'NOTE_IS_INSERTING_NOTES',
+			value: true,
+		});
+
+		try {
+			const noteSql = `
+				SELECT id, \`order\`, user_created_time, user_updated_time
+				FROM notes
+				WHERE is_conflict = 0 AND parent_id = ?
+			${this.customOrderByColumns('string')}`;
+
+			let notes = await this.modelSelectAll(noteSql, [folderId]);
+
+			// If the target index is the same as the source note index, exit now
+			for (let i = 0; i < notes.length; i++) {
+				const note = notes[i];
+				if (note.id === noteIds[0] && index === i) return defer();
+			}
+
+			// If some of the target notes have order = 0, set the order field to user_created_time
+			// (historically, all notes had the order field set to 0)
+			let hasSetOrder = false;
+			for (let i = 0; i < notes.length; i++) {
+				const note = notes[i];
+				if (!note.order) {
+					const updatedNote = await this.updateNoteOrder_(note, note.user_created_time);
+					notes[i] = updatedNote;
+					hasSetOrder = true;
+				}
+			}
+
+			if (hasSetOrder) notes = await this.modelSelectAll(noteSql, [folderId]);
+
+			// Find the order value for the first note to be inserted,
+			// and the increment between the order values of each inserted notes.
+			let newOrder = 0;
+			let intervalBetweenNotes = 0;
+			const defaultIntevalBetweeNotes = 60 * 60 * 1000;
+
+			if (!notes.length) { // If there's no notes in the target notebook
+				newOrder = Date.now();
+				intervalBetweenNotes = defaultIntevalBetweeNotes;
+			} else if (index >= notes.length) { // Insert at the end
+				intervalBetweenNotes = notes[notes.length - 1].order / (noteIds.length + 1);
+				newOrder = notes[notes.length - 1].order - intervalBetweenNotes;
+			} else if (index === 0) { // Insert at the beginning
+				const firstNoteOrder = notes[0].order;
+				if (firstNoteOrder >= Date.now()) {
+					intervalBetweenNotes = defaultIntevalBetweeNotes;
+					newOrder = firstNoteOrder + defaultIntevalBetweeNotes;
+				} else {
+					intervalBetweenNotes = (Date.now() - firstNoteOrder) / (noteIds.length + 1);
+					newOrder = firstNoteOrder + intervalBetweenNotes * noteIds.length;
+				}
+			} else { // Normal insert
+				let noteBefore = notes[index - 1];
+				let noteAfter = notes[index];
+
+				if (noteBefore.order === noteAfter.order) {
+					let previousOrder = noteBefore.order;
+					for (let i = index; i >= 0; i--) {
+						const n = notes[i];
+						if (n.order <= previousOrder) {
+							const o = previousOrder + defaultIntevalBetweeNotes;
+							const updatedNote = await this.updateNoteOrder_(n, o);
+							notes[i] = Object.assign({}, n, updatedNote);
+							previousOrder = o;
+						} else {
+							previousOrder = n.order;
+						}
+					}
+
+					noteBefore = notes[index - 1];
+					noteAfter = notes[index];
+				}
+
+				intervalBetweenNotes = (noteBefore.order - noteAfter.order) / (noteIds.length + 1);
+				newOrder = noteAfter.order + intervalBetweenNotes * noteIds.length;
+			}
+
+			// Set the order value for all the notes to be inserted
+			for (const noteId of noteIds) {
+				const note = await Note.load(noteId);
+				if (!note) throw new Error(`No such note: ${noteId}`);
+
+				await this.updateNoteOrder_({
+					id: noteId,
+					parent_id: folderId,
+					user_updated_time: note.user_updated_time,
+				}, newOrder);
+
+				newOrder -= intervalBetweenNotes;
+			}
+		} finally {
+			defer();
+		}
 	}
 
 }

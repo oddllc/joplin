@@ -1,19 +1,18 @@
 const BaseModel = require('lib/BaseModel.js');
 const BaseItem = require('lib/models/BaseItem.js');
+const ItemChange = require('lib/models/ItemChange.js');
 const NoteResource = require('lib/models/NoteResource.js');
 const ResourceLocalState = require('lib/models/ResourceLocalState.js');
 const Setting = require('lib/models/Setting.js');
-const ArrayUtils = require('lib/ArrayUtils.js');
 const pathUtils = require('lib/path-utils.js');
 const { mime } = require('lib/mime-utils.js');
-const { shim } = require('lib/shim');
 const { filename, safeFilename } = require('lib/path-utils.js');
 const { FsDriverDummy } = require('lib/fs-driver-dummy.js');
 const markdownUtils = require('lib/markdownUtils');
 const JoplinError = require('lib/JoplinError');
+const { _ } = require('lib/locale.js');
 
 class Resource extends BaseItem {
-
 	static tableName() {
 		return 'resources';
 	}
@@ -28,22 +27,31 @@ class Resource extends BaseItem {
 	}
 
 	static isSupportedImageMimeType(type) {
-		const imageMimeTypes = ["image/jpg", "image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/webp"];
+		const imageMimeTypes = ['image/jpg', 'image/jpeg', 'image/png', 'image/gif', 'image/svg+xml', 'image/webp'];
 		return imageMimeTypes.indexOf(type.toLowerCase()) >= 0;
 	}
 
 	static fetchStatuses(resourceIds) {
 		if (!resourceIds.length) return [];
-		return this.db().selectAll('SELECT resource_id, fetch_status FROM resource_local_states WHERE resource_id IN ("' + resourceIds.join('","') + '")');
+		return this.db().selectAll(`SELECT resource_id, fetch_status FROM resource_local_states WHERE resource_id IN ("${resourceIds.join('","')}")`);
+	}
+
+	static errorFetchStatuses() {
+		return this.db().selectAll(`
+			SELECT title AS resource_title, resource_id, fetch_error
+			FROM resource_local_states
+			LEFT JOIN resources ON resources.id = resource_local_states.resource_id
+			WHERE fetch_status = ?
+		`, [Resource.FETCH_STATUS_ERROR]);
 	}
 
 	static needToBeFetched(resourceDownloadMode = null, limit = null) {
-		let sql = ['SELECT * FROM resources WHERE encryption_applied = 0 AND id IN (SELECT resource_id FROM resource_local_states WHERE fetch_status = ?)'];
+		const sql = ['SELECT * FROM resources WHERE encryption_applied = 0 AND id IN (SELECT resource_id FROM resource_local_states WHERE fetch_status = ?)'];
 		if (resourceDownloadMode !== 'always') {
 			sql.push('AND resources.id IN (SELECT resource_id FROM resources_to_download)');
 		}
 		sql.push('ORDER BY updated_time DESC');
-		if (limit !== null) sql.push('LIMIT ' + limit);
+		if (limit !== null) sql.push(`LIMIT ${limit}`);
 		return this.modelSelectAll(sql.join(' '), [Resource.FETCH_STATUS_IDLE]);
 	}
 
@@ -51,17 +59,22 @@ class Resource extends BaseItem {
 		return await this.db().exec('UPDATE resource_local_states SET fetch_status = ? WHERE fetch_status = ?', [Resource.FETCH_STATUS_IDLE, Resource.FETCH_STATUS_STARTED]);
 	}
 
+	static resetErrorStatus(resourceId) {
+		return this.db().exec('UPDATE resource_local_states SET fetch_status = ?, fetch_error = "" WHERE resource_id = ?', [Resource.FETCH_STATUS_IDLE, resourceId]);
+	}
+
 	static fsDriver() {
 		if (!Resource.fsDriver_) Resource.fsDriver_ = new FsDriverDummy();
 		return Resource.fsDriver_;
 	}
 
+	// DEPRECATED IN FAVOUR OF friendlySafeFilename()
 	static friendlyFilename(resource) {
 		let output = safeFilename(resource.title); // Make sure not to allow spaces or any special characters as it's not supported in HTTP headers
 		if (!output) output = resource.id;
 		let extension = resource.file_extension;
 		if (!extension) extension = resource.mime ? mime.toFileExtension(resource.mime) : '';
-		extension = extension ? ('.' + extension) : '';
+		extension = extension ? `.${extension}` : '';
 		return output + extension;
 	}
 
@@ -76,21 +89,43 @@ class Resource extends BaseItem {
 	static filename(resource, encryptedBlob = false) {
 		let extension = encryptedBlob ? 'crypted' : resource.file_extension;
 		if (!extension) extension = resource.mime ? mime.toFileExtension(resource.mime) : '';
-		extension = extension ? ('.' + extension) : '';
+		extension = extension ? `.${extension}` : '';
 		return resource.id + extension;
 	}
 
+	static friendlySafeFilename(resource) {
+		let ext = resource.file_extension;
+		if (!ext) ext = resource.mime ? mime.toFileExtension(resource.mime) : '';
+		const safeExt = ext ? pathUtils.safeFileExtension(ext).toLowerCase() : '';
+		let title = resource.title ? resource.title : resource.id;
+		if (safeExt && pathUtils.fileExtension(title).toLowerCase() === safeExt) title = pathUtils.filename(title);
+		return pathUtils.friendlySafeFilename(title) + (safeExt ? `.${safeExt}` : '');
+	}
+
 	static relativePath(resource, encryptedBlob = false) {
-		return Setting.value('resourceDirName') + '/' + this.filename(resource, encryptedBlob);
+		return `${Setting.value('resourceDirName')}/${this.filename(resource, encryptedBlob)}`;
 	}
 
 	static fullPath(resource, encryptedBlob = false) {
-		return Setting.value('resourceDir') + '/' + this.filename(resource, encryptedBlob);
+		return `${Setting.value('resourceDir')}/${this.filename(resource, encryptedBlob)}`;
 	}
 
 	static async isReady(resource) {
+		const r = await this.readyStatus(resource);
+		return r === 'ok';
+	}
+
+	static async readyStatus(resource) {
 		const ls = await this.localState(resource);
-		return resource && ls.fetch_status === Resource.FETCH_STATUS_DONE && !resource.encryption_blob_encrypted;
+		if (!resource) return 'notFound';
+		if (ls.fetch_status !== Resource.FETCH_STATUS_DONE) return 'notDownloaded';
+		if (resource.encryption_blob_encrypted) return 'encrypted';
+		return 'ok';
+	}
+
+	static async requireIsReady(resource) {
+		const readyStatus = await Resource.readyStatus(resource);
+		if (readyStatus !== 'ok') throw new Error(`Resource is not ready. Status: ${readyStatus}`);
 	}
 
 	// For resources, we need to decrypt the item (metadata) and the resource binary blob.
@@ -109,7 +144,7 @@ class Resource extends BaseItem {
 
 		const plainTextPath = this.fullPath(decryptedItem);
 		const encryptedPath = this.fullPath(decryptedItem, true);
-		const noExtPath = pathUtils.dirname(encryptedPath) + '/' + pathUtils.filename(encryptedPath);
+		const noExtPath = `${pathUtils.dirname(encryptedPath)}/${pathUtils.filename(encryptedPath)}`;
 
 		// When the resource blob is downloaded by the synchroniser, it's initially a file with no
 		// extension (since it's encrypted, so we don't know its extension). So here rename it
@@ -126,7 +161,7 @@ class Resource extends BaseItem {
 				// As the identifier is invalid it most likely means that this is not encrypted data
 				// at all. It can happen for example when there's a crash between the moment the data
 				// is decrypted and the resource item is updated.
-				this.logger().warn('Found a resource that was most likely already decrypted but was marked as encrypted. Marked it as decrypted: ' + item.id)
+				this.logger().warn(`Found a resource that was most likely already decrypted but was marked as encrypted. Marked it as decrypted: ${item.id}`);
 				this.fsDriver().move(encryptedPath, plainTextPath);
 			} else {
 				throw error;
@@ -147,7 +182,7 @@ class Resource extends BaseItem {
 
 		if (!Setting.value('encryption.enabled')) {
 			// Normally not possible since itemsThatNeedSync should only return decrypted items
-			if (!!resource.encryption_blob_encrypted) throw new Error('Trying to access encrypted resource but encryption is currently disabled');
+			if (resource.encryption_blob_encrypted) throw new Error('Trying to access encrypted resource but encryption is currently disabled');
 			return { path: plainTextPath, resource: resource };
 		}
 
@@ -157,7 +192,7 @@ class Resource extends BaseItem {
 		try {
 			await this.encryptionService().encryptFile(plainTextPath, encryptedPath);
 		} catch (error) {
-			if (error.code === 'ENOENT') throw new JoplinError('File not found:' + error.toString(), 'fileNotFound');
+			if (error.code === 'ENOENT') throw new JoplinError(`File not found:${error.toString()}`, 'fileNotFound');
 			throw error;
 		}
 
@@ -169,21 +204,21 @@ class Resource extends BaseItem {
 	static markdownTag(resource) {
 		let tagAlt = resource.alt ? resource.alt : resource.title;
 		if (!tagAlt) tagAlt = '';
-		let lines = [];
+		const lines = [];
 		if (Resource.isSupportedImageMimeType(resource.mime)) {
-			lines.push("![");
-			lines.push(markdownUtils.escapeLinkText(tagAlt));
-			lines.push("](:/" + resource.id + ")");
+			lines.push('![');
+			lines.push(markdownUtils.escapeTitleText(tagAlt));
+			lines.push(`](:/${resource.id})`);
 		} else {
-			lines.push("[");
-			lines.push(markdownUtils.escapeLinkText(tagAlt));
-			lines.push("](:/" + resource.id + ")");
+			lines.push('[');
+			lines.push(markdownUtils.escapeTitleText(tagAlt));
+			lines.push(`](:/${resource.id})`);
 		}
 		return lines.join('');
 	}
 
 	static internalUrl(resource) {
-		return ':/' + resource.id;
+		return `:/${resource.id}`;
 	}
 
 	static pathToId(path) {
@@ -203,11 +238,11 @@ class Resource extends BaseItem {
 	}
 
 	static urlToId(url) {
-		if (!this.isResourceUrl(url)) throw new Error('Not a valid resource URL: ' + url);
+		if (!this.isResourceUrl(url)) throw new Error(`Not a valid resource URL: ${url}`);
 		return url.substr(2);
 	}
 
-	static localState(resourceOrId) {
+	static async localState(resourceOrId) {
 		return ResourceLocalState.byResourceId(typeof resourceOrId === 'object' ? resourceOrId.id : resourceOrId);
 	}
 
@@ -251,12 +286,92 @@ class Resource extends BaseItem {
 		await this.db().exec('INSERT INTO resources_to_download (resource_id, updated_time, created_time) SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM resources_to_download WHERE resource_id = ?)', [resourceId, t, t, resourceId]);
 	}
 
-	static async downloadedButEncryptedBlobCount() {
-		const r = await this.db().selectOne('SELECT count(*) as total FROM resource_local_states WHERE fetch_status = ? AND resource_id IN (SELECT id FROM resources WHERE encryption_blob_encrypted = 1)', [
-			Resource.FETCH_STATUS_DONE,
-		]);
+	static async downloadedButEncryptedBlobCount(excludedIds = null) {
+		let excludedSql = '';
+		if (excludedIds && excludedIds.length) {
+			excludedSql = `AND resource_id NOT IN ("${excludedIds.join('","')}")`;
+		}
+
+		const r = await this.db().selectOne(`
+			SELECT count(*) as total
+			FROM resource_local_states
+			WHERE fetch_status = ?
+			AND resource_id IN (SELECT id FROM resources WHERE encryption_blob_encrypted = 1)
+			${excludedSql}
+		`, [Resource.FETCH_STATUS_DONE]);
 
 		return r ? r.total : 0;
+	}
+
+	static async downloadStatusCounts(status) {
+		const r = await this.db().selectOne(`
+			SELECT count(*) as total
+			FROM resource_local_states
+			WHERE fetch_status = ?
+		`, [status]);
+
+		return r ? r.total : 0;
+	}
+
+	static fetchStatusToLabel(status) {
+		if (status === Resource.FETCH_STATUS_IDLE) return _('Not downloaded');
+		if (status === Resource.FETCH_STATUS_STARTED) return _('Downloading');
+		if (status === Resource.FETCH_STATUS_DONE) return _('Downloaded');
+		if (status === Resource.FETCH_STATUS_ERROR) return _('Error');
+		throw new Error(`Invalid status: ${status}`);
+	}
+
+	static async updateResourceBlobContent(resourceId, newBlobFilePath) {
+		const resource = await Resource.load(resourceId);
+		await this.requireIsReady(resource);
+
+		const fileStat = await this.fsDriver().stat(newBlobFilePath);
+		await this.fsDriver().copy(newBlobFilePath, Resource.fullPath(resource));
+
+		return await Resource.save({
+			id: resource.id,
+			size: fileStat.size,
+		});
+	}
+
+	static async resourceBlobContent(resourceId, encoding = 'Buffer') {
+		const resource = await Resource.load(resourceId);
+		await this.requireIsReady(resource);
+		return await this.fsDriver().readFile(Resource.fullPath(resource), encoding);
+	}
+
+	static async duplicateResource(resourceId) {
+		const resource = await Resource.load(resourceId);
+		const localState = await Resource.localState(resource);
+
+		let newResource = { ...resource };
+		delete newResource.id;
+		newResource = await Resource.save(newResource);
+
+		const newLocalState = { ...localState };
+		newLocalState.resource_id = newResource.id;
+		delete newLocalState.id;
+
+		await Resource.setLocalState(newResource, newLocalState);
+
+		const sourcePath = Resource.fullPath(resource);
+		if (await this.fsDriver().exists(sourcePath)) {
+			await this.fsDriver().copy(sourcePath, Resource.fullPath(newResource));
+		}
+
+		return newResource;
+	}
+
+	static async createConflictResourceNote(resource) {
+		const Note = this.getClass('Note');
+
+		const conflictResource = await Resource.duplicateResource(resource.id);
+
+		await Note.save({
+			title: _('Attachment conflict: "%s"', resource.title),
+			body: _('There was a [conflict](%s) on the attachment below.\n\n%s', 'https://joplinapp.org/conflict/', Resource.markdownTag(conflictResource)),
+			is_conflict: 1,
+		}, { changeSource: ItemChange.SOURCE_SYNC });
 	}
 
 }
